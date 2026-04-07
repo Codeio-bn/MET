@@ -1,8 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { MapContainer, TileLayer, Marker, Popup, Polyline, useMap } from 'react-leaflet';
+import MarkerClusterGroup from 'react-leaflet-cluster';
 import L from 'leaflet';
 import { io } from 'socket.io-client';
+import QRCode from 'qrcode';
+import * as XLSX from 'xlsx';
 import { playAlert } from '../lib/alert';
 
 // ─── Leaflet marker fix ──────────────────────────────────────────────────────
@@ -135,6 +138,12 @@ export default function DashboardView() {
   const [activeEventId, setActiveEventId] = useState(null); // null = alle evenementen
   const [showEventPicker, setShowEventPicker] = useState(false);
   const [assigningId, setAssigningId]         = useState(null);
+  const [connected, setConnected]             = useState(true);
+  const [filterPriority, setFilterPriority]   = useState(null);
+  const [filterTeam, setFilterTeam]           = useState(null);
+  const [showFilter, setShowFilter]           = useState(false);
+  const [qrUrls, setQrUrls]                   = useState({});
+  const [qrModal, setQrModal]                 = useState(null); // { label, key }
   const listRefs = useRef({});
 
   const teams  = settings?.teams ?? FALLBACK_TEAMS;
@@ -193,6 +202,9 @@ export default function DashboardView() {
     });
 
     socket.on('incidents_reset', () => setIncidents([]));
+
+    socket.on('disconnect', () => setConnected(false));
+    socket.on('connect',    () => setConnected(true));
 
     socket.on('settings_updated', ({ key, value }) => {
       setSettings(s => s ? { ...s, [key]: value } : s);
@@ -271,6 +283,21 @@ export default function DashboardView() {
     setAssigningId(null);
   }, []);
 
+  // Generate QR codes when links panel opens
+  useEffect(() => {
+    if (!showLinks) return;
+    const allLinks = [
+      ...teams.map(({ role }) => ({ key: role, url: `${window.location.origin}/report?role=${role}` })),
+      { key: '__meld', url: `${window.location.origin}/meld` },
+    ];
+    Promise.all(
+      allLinks.map(({ key, url }) =>
+        QRCode.toDataURL(url, { margin: 1, width: 140, color: { dark: '#ffffff', light: '#1e293b' } })
+          .then(dataUrl => [key, dataUrl])
+      )
+    ).then(entries => setQrUrls(Object.fromEntries(entries)));
+  }, [showLinks, teams]);
+
   const activeEvent = settings?.active_event ?? null;
 
   const setActiveEvent = useCallback(async (event) => {
@@ -284,55 +311,106 @@ export default function DashboardView() {
   }, []);
 
   // Filter incidents by active event filter (reuses activeEventId from route bar)
-  const visibleIncidents = incidents.filter(inc => {
-    if (activeEventId === 'none') return true; // show all when no route filter
-    if (activeEventId === null)   return true; // show all
+  const eventFiltered = incidents.filter(inc => {
+    if (activeEventId === 'none') return true;
+    if (activeEventId === null)   return true;
     return inc.event_id === activeEventId;
   });
+
+  const visibleIncidents = eventFiltered
+    .filter(inc => !filterPriority || inc.priority === filterPriority)
+    .filter(inc => !filterTeam    || inc.assigned_team === filterTeam);
 
   const openCount   = visibleIncidents.filter((i) => i.status === 'open').length;
   const closedCount = incidents.filter((i) => i.status === 'closed').length;
 
+  // Team open-incident counts (based on event filter, ignoring priority/team filter)
+  const teamCounts = teams.reduce((acc, t) => {
+    acc[t.label] = eventFiltered.filter(i => i.status === 'open' && i.assigned_team === t.label).length;
+    return acc;
+  }, {});
+  const unassignedOpenCount = eventFiltered.filter(i => i.status === 'open' && !i.assigned_team).length;
+
+  const exportXLSX = useCallback(() => {
+    const rows = incidents.map(i => ({
+      Tijd:        new Date(i.created_at).toLocaleString('nl-NL'),
+      Melder:      i.reporter,
+      Prioriteit:  i.priority,
+      Status:      i.status,
+      Team:        i.assigned_team || '',
+      Melding:     i.complaint    || '',
+      Evenement:   i.event_name   || '',
+      Lat:         i.lat ?? '',
+      Lng:         i.lng ?? '',
+    }));
+    const ws = XLSX.utils.json_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Incidenten');
+    const date = new Date().toISOString().slice(0, 10);
+    XLSX.writeFile(wb, `smet-incidenten-${date}.xlsx`);
+  }, [incidents]);
+
   return (
     <div className="page-enter flex h-screen bg-slate-950 overflow-hidden">
+
+      {/* ── Offline banner ── */}
+      {!connected && (
+        <div className="fixed top-0 left-0 right-0 z-[9999] bg-red-700 text-white text-xs font-bold text-center py-2 tracking-wide">
+          Verbinding verbroken — live updates liggen stil. Herverbinden…
+        </div>
+      )}
 
       {/* ── Right: Incident Feed (40%) ── */}
       <div className="w-2/5 flex flex-col border-l border-slate-700 overflow-hidden order-last">
 
         {/* Header */}
         <div className="bg-slate-900 border-b border-slate-700 shrink-0">
-          <div className="px-4 py-3 flex items-center justify-between gap-2">
-            <div>
-              <h1 className="text-white font-bold text-lg tracking-wide">SMET Dashboard</h1>
-              <p className="text-slate-400 text-xs mt-0.5">
+          <div className="px-4 py-3 flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <h1 className="text-white font-bold text-lg tracking-wide leading-none">SMET</h1>
+              <p className="text-slate-400 text-xs mt-1">
                 {openCount} open &bull; {visibleIncidents.length} zichtbaar
+                {unassignedOpenCount > 0 && (
+                  <span className="ml-2 text-amber-400 font-semibold">{unassignedOpenCount} ontoeg.</span>
+                )}
               </p>
+              {/* Team counts — only teams with open incidents */}
+              {teams.some(t => teamCounts[t.label] > 0) && (
+                <div className="flex gap-1.5 mt-1.5 flex-wrap">
+                  {teams.filter(t => teamCounts[t.label] > 0).map(t => (
+                    <span key={t.role} className="text-xs bg-blue-900/50 text-blue-300 px-1.5 py-0.5 rounded font-semibold">
+                      {t.label} {teamCounts[t.label]}
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
-            <div className="flex gap-1.5 shrink-0">
+            <div className="flex gap-1.5 shrink-0 items-center">
               <button
-                onClick={() => { setShowLinks((v) => !v); setShowBeheer(false); setConfirm(null); }}
+                onClick={() => { setShowLinks(v => !v); setShowBeheer(false); setConfirm(null); }}
                 className={`text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors
-                  ${showLinks ? 'bg-blue-600 text-white' : 'bg-slate-700 hover:bg-slate-600 text-slate-300'}`}
+                  ${showLinks ? 'bg-blue-600 text-white' : 'bg-slate-800 hover:bg-slate-700 text-slate-300'}`}
               >
-                {showLinks ? 'Verberg' : 'Links'}
+                Links
               </button>
               <button
-                onClick={() => { setShowBeheer((v) => !v); setShowLinks(false); setConfirm(null); }}
+                onClick={() => { setShowBeheer(v => !v); setShowLinks(false); setConfirm(null); }}
                 className={`text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors
-                  ${showBeheer ? 'bg-red-700 text-white' : 'bg-slate-700 hover:bg-slate-600 text-slate-300'}`}
+                  ${showBeheer ? 'bg-red-700 text-white' : 'bg-slate-800 hover:bg-slate-700 text-slate-300'}`}
               >
                 Beheer
               </button>
               <button
-                onClick={() => navigate('/rapportage')}
-                className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors"
-                title="Rapportage"
+                onClick={() => setShowFilter(v => !v)}
+                className={`text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors
+                  ${(filterPriority || filterTeam) ? 'bg-amber-600 text-white' : showFilter ? 'bg-slate-700 text-white' : 'bg-slate-800 hover:bg-slate-700 text-slate-300'}`}
+                title="Filter meldingen"
               >
-                📋
+                {(filterPriority || filterTeam) ? 'Filter ●' : 'Filter'}
               </button>
               <button
                 onClick={() => navigate('/settings')}
-                className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors"
+                className="text-slate-500 hover:text-white p-1.5 rounded-lg hover:bg-slate-800 transition-colors"
                 title="Instellingen"
               >
                 ⚙
@@ -403,37 +481,55 @@ export default function DashboardView() {
             }}
           >
             <div className="overflow-hidden">
-              <div className="px-4 pb-3 pt-1 flex flex-col gap-1.5">
-                <p className="text-slate-500 text-xs font-semibold uppercase tracking-widest mb-1">
-                  Rapportagelinks — tik om te openen of te delen
+              <div className="px-4 pb-3 pt-1 flex flex-col gap-2">
+                <p className="text-slate-500 text-xs font-semibold uppercase tracking-widest">
+                  Rapportagelinks
                 </p>
-                {teams.map(({ role, label }) => {
-                  const url = `${window.location.origin}/report?role=${role}`;
-                  return (
-                    <a
-                      key={role}
-                      href={url}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="flex items-center justify-between bg-slate-800 hover:bg-slate-700 rounded-xl px-3 py-2 transition-colors group"
-                    >
-                      <span className="text-white text-sm font-medium">{label}</span>
-                      <span className="text-slate-500 group-hover:text-slate-300 text-xs truncate max-w-[55%] text-right">
-                        /report?role={role}
-                      </span>
-                    </a>
-                  );
-                })}
-                <div className="w-full h-px bg-slate-700 my-0.5" />
-                <a
-                  href={`${window.location.origin}/meld`}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="flex items-center justify-between bg-slate-800 hover:bg-slate-700 rounded-xl px-3 py-2 transition-colors group"
-                >
-                  <span className="text-white text-sm font-medium">👥 Omstander melding</span>
-                  <span className="text-slate-500 group-hover:text-slate-300 text-xs text-right">/meld</span>
-                </a>
+
+                {/* 2-column team grid */}
+                <div className="grid grid-cols-2 gap-1.5">
+                  {teams.map(({ role, label }) => {
+                    const url = `${window.location.origin}/report?role=${role}`;
+                    return (
+                      <div key={role} className="flex items-center gap-1 bg-slate-800 rounded-xl px-2.5 py-2 min-w-0">
+                        <a
+                          href={url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="flex-1 text-white text-xs font-semibold hover:text-blue-400 transition-colors truncate"
+                        >
+                          {label}
+                        </a>
+                        <button
+                          onClick={() => setQrModal({ label, key: role })}
+                          className="text-slate-500 hover:text-white text-sm shrink-0 transition-colors leading-none"
+                          title="QR-code tonen"
+                        >
+                          ▣
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Omstander — full width */}
+                <div className="flex items-center gap-2 bg-slate-800 rounded-xl px-3 py-2">
+                  <a
+                    href={`${window.location.origin}/meld`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="flex-1 text-white text-sm font-medium hover:text-blue-400 transition-colors"
+                  >
+                    👥 Omstander melding
+                  </a>
+                  <button
+                    onClick={() => setQrModal({ label: 'Omstander melding', key: '__meld' })}
+                    className="text-slate-500 hover:text-white text-sm shrink-0 transition-colors leading-none"
+                    title="QR-code tonen"
+                  >
+                    ▣
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -448,8 +544,27 @@ export default function DashboardView() {
             <div className="overflow-hidden">
               <div className="px-4 pb-3 pt-1 flex flex-col gap-2">
                 <p className="text-slate-500 text-xs font-semibold uppercase tracking-widest mb-1">
-                  Meldingen beheren
+                  Beheer
                 </p>
+
+                {/* Navigate + export row */}
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => navigate('/rapportage')}
+                    className="flex-1 text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl py-2 transition-colors"
+                  >
+                    📋 Rapportage
+                  </button>
+                  <button
+                    onClick={exportXLSX}
+                    title={incidents.length === 0 ? 'Geen meldingen om te exporteren' : `${incidents.length} melding(en) exporteren als Excel`}
+                    className="flex-1 text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl py-2 transition-colors"
+                  >
+                    ↓ Excel exporteren
+                  </button>
+                </div>
+
+                <div className="w-full h-px bg-slate-700/60" />
 
                 {/* Delete closed */}
                 <div className="flex gap-2">
@@ -474,7 +589,7 @@ export default function DashboardView() {
                       disabled={closedCount === 0}
                       className="flex-1 text-xs font-semibold bg-slate-800 hover:bg-slate-700 disabled:opacity-30 disabled:cursor-not-allowed text-slate-300 rounded-xl py-2 transition-colors"
                     >
-                      Verwijder gesloten meldingen ({closedCount})
+                      Verwijder gesloten ({closedCount})
                     </button>
                   )}
                 </div>
@@ -500,7 +615,7 @@ export default function DashboardView() {
                     <button
                       onClick={() => setConfirm('all')}
                       disabled={incidents.length === 0}
-                      className="flex-1 text-xs font-semibold bg-red-900/50 hover:bg-red-900 disabled:opacity-30 disabled:cursor-not-allowed text-red-300 rounded-xl py-2 transition-colors"
+                      className="flex-1 text-xs font-semibold bg-red-900/40 hover:bg-red-900 disabled:opacity-30 disabled:cursor-not-allowed text-red-400 rounded-xl py-2 transition-colors"
                     >
                       Alles resetten &amp; verwijderen
                     </button>
@@ -578,6 +693,45 @@ export default function DashboardView() {
           </div>
         )}
 
+        {/* Filter bar */}
+        {showFilter && (
+          <div className="shrink-0 border-b border-slate-800 bg-slate-900 px-4 py-2.5 flex flex-col gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-slate-500 text-xs font-semibold uppercase tracking-wider shrink-0">Prioriteit</span>
+              {[null, 'high', 'medium', 'low'].map(p => (
+                <button
+                  key={p ?? 'all'}
+                  onClick={() => setFilterPriority(p)}
+                  className={`text-xs font-bold px-2.5 py-1 rounded-lg transition-colors
+                    ${filterPriority === p
+                      ? p === 'high' ? 'bg-red-600 text-white' : p === 'medium' ? 'bg-yellow-600 text-white' : p === 'low' ? 'bg-green-700 text-white' : 'bg-slate-600 text-white'
+                      : 'bg-slate-800 hover:bg-slate-700 text-slate-400'}`}
+                >
+                  {p === null ? 'Alle' : p === 'high' ? 'Hoog' : p === 'medium' ? 'Mid' : 'Laag'}
+                </button>
+              ))}
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-slate-500 text-xs font-semibold uppercase tracking-wider shrink-0">Team</span>
+              <button
+                onClick={() => setFilterTeam(null)}
+                className={`text-xs font-bold px-2.5 py-1 rounded-lg transition-colors ${!filterTeam ? 'bg-slate-600 text-white' : 'bg-slate-800 hover:bg-slate-700 text-slate-400'}`}
+              >
+                Alle
+              </button>
+              {teams.map(t => (
+                <button
+                  key={t.role}
+                  onClick={() => setFilterTeam(filterTeam === t.label ? null : t.label)}
+                  className={`text-xs font-bold px-2.5 py-1 rounded-lg transition-colors ${filterTeam === t.label ? 'bg-blue-600 text-white' : 'bg-slate-800 hover:bg-slate-700 text-slate-400'}`}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Feed list */}
         <div className="flex-1 overflow-y-auto">
           {visibleIncidents.length === 0 && (
@@ -627,12 +781,20 @@ export default function DashboardView() {
                           👥 {inc.assigned_team}
                         </span>
                       )}
+                      {inc.rejected_by && (
+                        <span className="text-xs font-semibold px-1.5 py-0.5 rounded bg-orange-500/20 text-orange-400" title={inc.rejection_reason || ''}>
+                          ✗ Afgew. door {inc.rejected_by}
+                        </span>
+                      )}
                       {inc.status === 'closed' && (
                         <span className="text-xs text-slate-500">GESLOTEN</span>
                       )}
                     </div>
                     {inc.complaint && (
                       <p className="text-slate-300 text-xs mt-1 line-clamp-2">{inc.complaint}</p>
+                    )}
+                    {inc.rejected_by && inc.rejection_reason && (
+                      <p className="text-orange-400/80 text-xs mt-0.5 italic">"{inc.rejection_reason}"</p>
                     )}
                     {inc.event_name && (
                       <p className="text-slate-500 text-xs mt-0.5">📅 {inc.event_name}</p>
@@ -796,27 +958,29 @@ export default function DashboardView() {
             </Marker>
           ))}
 
-          {visibleIncidents.map((inc) =>
-            inc.lat && inc.lng ? (
-              <Marker
-                key={`${inc.id}-${selectedId === inc.id}`}
-                position={[inc.lat, inc.lng]}
-                icon={makeIcon(inc.priority, selectedId === inc.id)}
-                eventHandlers={{ click: () => selectIncident(inc.id) }}
-              >
-                <Popup>
-                  <div style={{ minWidth: 160 }}>
-                    <p style={{ fontWeight: 'bold', marginBottom: 4 }}>{inc.reporter}</p>
-                    <p style={{ color: PRIORITY_COLOR[inc.priority], fontWeight: 'bold', fontSize: 12 }}>
-                      {PRIORITY_LABEL[inc.priority]}
-                    </p>
-                    {inc.complaint && <p style={{ marginTop: 4, fontSize: 12 }}>{inc.complaint}</p>}
-                    <p style={{ marginTop: 4, fontSize: 11, color: '#666' }}>{fmtTime(inc.created_at)}</p>
-                  </div>
-                </Popup>
-              </Marker>
-            ) : null
-          )}
+          <MarkerClusterGroup chunkedLoading>
+            {visibleIncidents.map((inc) =>
+              inc.lat && inc.lng ? (
+                <Marker
+                  key={`${inc.id}-${selectedId === inc.id}`}
+                  position={[inc.lat, inc.lng]}
+                  icon={makeIcon(inc.priority, selectedId === inc.id)}
+                  eventHandlers={{ click: () => selectIncident(inc.id) }}
+                >
+                  <Popup>
+                    <div style={{ minWidth: 160 }}>
+                      <p style={{ fontWeight: 'bold', marginBottom: 4 }}>{inc.reporter}</p>
+                      <p style={{ color: PRIORITY_COLOR[inc.priority], fontWeight: 'bold', fontSize: 12 }}>
+                        {PRIORITY_LABEL[inc.priority]}
+                      </p>
+                      {inc.complaint && <p style={{ marginTop: 4, fontSize: 12 }}>{inc.complaint}</p>}
+                      <p style={{ marginTop: 4, fontSize: 11, color: '#666' }}>{fmtTime(inc.created_at)}</p>
+                    </div>
+                  </Popup>
+                </Marker>
+              ) : null
+            )}
+          </MarkerClusterGroup>
         </MapContainer>
 
         {/* Live badge */}
@@ -831,6 +995,36 @@ export default function DashboardView() {
           LIVE
         </div>
       </div>
+
+      {/* QR-code modal */}
+      {qrModal && (
+        <div
+          className="fixed inset-0 z-[9998] bg-black/75 flex items-center justify-center"
+          onClick={() => setQrModal(null)}
+        >
+          <div
+            className="bg-slate-800 border border-slate-700 rounded-2xl p-6 flex flex-col items-center gap-4 shadow-2xl"
+            onClick={e => e.stopPropagation()}
+          >
+            <p className="text-white font-bold text-base">{qrModal.label}</p>
+            {qrUrls[qrModal.key]
+              ? <img src={qrUrls[qrModal.key]} alt={qrModal.label} className="rounded-xl" style={{ width: 220, height: 220 }} />
+              : <div className="w-[220px] h-[220px] bg-slate-700 rounded-xl flex items-center justify-center text-slate-500 text-sm">Laden…</div>
+            }
+            <p className="text-slate-400 text-xs text-center break-all max-w-[260px]">
+              {qrModal.key === '__meld'
+                ? `${window.location.origin}/meld`
+                : `${window.location.origin}/report?role=${qrModal.key}`}
+            </p>
+            <button
+              onClick={() => setQrModal(null)}
+              className="text-slate-400 hover:text-white text-sm transition-colors"
+            >
+              Sluiten
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

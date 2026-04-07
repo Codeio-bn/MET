@@ -44,6 +44,26 @@ router.post('/', async (req, res) => {
   }
 });
 
+// PATCH /:id/reject — team rejects the assignment
+router.patch('/:id/reject', async (req, res) => {
+  const { team, reason } = req.body;
+  try {
+    const result = await pool.query(
+      `UPDATE incidents
+       SET assigned_team = NULL, rejected_by = $2, rejection_reason = $3
+       WHERE id = $1 RETURNING *`,
+      [req.params.id, team || null, reason?.trim() || null]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Incident not found' });
+    const incident = result.rows[0];
+    req.io.emit('incident_updated', incident);
+    res.json(incident);
+  } catch (err) {
+    console.error('PATCH /incidents/:id/reject error:', err.message);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
 // PATCH /:id/assign — assign or unassign a team
 router.patch('/:id/assign', async (req, res) => {
   const { team } = req.body;

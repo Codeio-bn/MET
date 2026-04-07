@@ -22,9 +22,11 @@ const initDB = async () => {
     )
   `);
   // Add event columns to existing installations
-  await pool.query(`ALTER TABLE incidents ADD COLUMN IF NOT EXISTS event_id      VARCHAR(100)`);
-  await pool.query(`ALTER TABLE incidents ADD COLUMN IF NOT EXISTS event_name    VARCHAR(200)`);
-  await pool.query(`ALTER TABLE incidents ADD COLUMN IF NOT EXISTS assigned_team VARCHAR(100)`);
+  await pool.query(`ALTER TABLE incidents ADD COLUMN IF NOT EXISTS event_id         VARCHAR(100)`);
+  await pool.query(`ALTER TABLE incidents ADD COLUMN IF NOT EXISTS event_name       VARCHAR(200)`);
+  await pool.query(`ALTER TABLE incidents ADD COLUMN IF NOT EXISTS assigned_team    VARCHAR(100)`);
+  await pool.query(`ALTER TABLE incidents ADD COLUMN IF NOT EXISTS rejected_by      VARCHAR(100)`);
+  await pool.query(`ALTER TABLE incidents ADD COLUMN IF NOT EXISTS rejection_reason TEXT`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS settings (

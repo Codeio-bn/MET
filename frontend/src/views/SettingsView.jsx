@@ -109,9 +109,11 @@ function EventsTab({ settings, setSettings }) {
   const [routeForm, setRouteForm]   = useState({}); // per-eventId form state
   const [waypointFile, setWaypointFile] = useState({}); // per-eventId file
   const [uploadingWp, setUploadingWp]   = useState(null);
-  const [editingId, setEditingId]       = useState(null);
-  const [editFields, setEditFields]     = useState({});
-  const [wpOpen, setWpOpen]             = useState(new Set());
+  const [editingId, setEditingId]         = useState(null);
+  const [editFields, setEditFields]       = useState({});
+  const [wpOpen, setWpOpen]               = useState(new Set());
+  const [routesOpen, setRoutesOpen]       = useState(new Set());
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
 
   const saveEvents = useCallback(async (events) => {
     await fetch('/api/settings/events', {
@@ -137,6 +139,12 @@ function EventsTab({ settings, setSettings }) {
 
   const deleteEvent = useCallback(async (id) => {
     await saveEvents(settings.events.filter(e => e.id !== id));
+    setConfirmDeleteId(null);
+  }, [settings.events, saveEvents]);
+
+  const duplicateEvent = useCallback(async (event) => {
+    const copy = { ...event, id: crypto.randomUUID(), name: `${event.name} (kopie)` };
+    await saveEvents([...settings.events, copy]);
   }, [settings.events, saveEvents]);
 
   const startEdit = useCallback((event) => {
@@ -293,34 +301,74 @@ function EventsTab({ settings, setSettings }) {
                   Bewerk
                 </button>
                 <button
-                  onClick={() => deleteEvent(event.id)}
-                  className="text-xs text-red-400 hover:text-white bg-slate-700 hover:bg-red-700 px-2.5 py-1.5 rounded-lg transition-colors"
+                  onClick={() => duplicateEvent(event)}
+                  className="text-xs text-slate-300 hover:text-white bg-slate-700 hover:bg-slate-600 px-2.5 py-1.5 rounded-lg transition-colors"
+                  title="Dupliceer evenement"
                 >
-                  Verwijder
+                  Kopieer
                 </button>
+                {confirmDeleteId === event.id ? (
+                  <>
+                    <button
+                      onClick={() => deleteEvent(event.id)}
+                      className="text-xs font-bold text-white bg-red-700 hover:bg-red-600 px-2.5 py-1.5 rounded-lg transition-colors"
+                    >
+                      Zeker?
+                    </button>
+                    <button
+                      onClick={() => setConfirmDeleteId(null)}
+                      className="text-xs text-slate-400 bg-slate-700 hover:bg-slate-600 px-2.5 py-1.5 rounded-lg transition-colors"
+                    >
+                      Nee
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    onClick={() => setConfirmDeleteId(event.id)}
+                    className="text-xs text-red-400 hover:text-white bg-slate-700 hover:bg-red-700 px-2.5 py-1.5 rounded-lg transition-colors"
+                  >
+                    Verwijder
+                  </button>
+                )}
               </div>
             </div>
           )}
 
           {/* Routes */}
           <div className="flex flex-col gap-1.5">
-            <p className="text-slate-500 text-xs font-semibold uppercase tracking-wider">Routes</p>
-            {(event.routes ?? []).length === 0 && (
-              <p className="text-slate-600 text-xs italic">Geen routes</p>
+            <button
+              onClick={() => setRoutesOpen(s => {
+                const next = new Set(s);
+                next.has(event.id) ? next.delete(event.id) : next.add(event.id);
+                return next;
+              })}
+              className="flex items-center justify-between w-full text-left"
+            >
+              <p className="text-slate-500 text-xs font-semibold uppercase tracking-wider">
+                Routes ({(event.routes ?? []).length})
+              </p>
+              <span className="text-slate-500 text-xs">{routesOpen.has(event.id) ? '▲' : '▼'}</span>
+            </button>
+            {routesOpen.has(event.id) && (
+              <>
+                {(event.routes ?? []).length === 0 && (
+                  <p className="text-slate-600 text-xs italic">Geen routes</p>
+                )}
+                {(event.routes ?? []).map(route => (
+                  <div key={route.id} className="flex items-center gap-2 bg-slate-700 rounded-xl px-3 py-2">
+                    <div className="w-3 h-3 rounded-full shrink-0" style={{ background: route.color }} />
+                    <span className="text-white text-sm flex-1 truncate">{route.name}</span>
+                    <span className="text-slate-500 text-xs shrink-0">{(route.coords?.length ?? 0)} punten</span>
+                    <button
+                      onClick={() => deleteRoute(event.id, route.id)}
+                      className="text-red-400 hover:text-white text-xs shrink-0 transition-colors"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+              </>
             )}
-            {(event.routes ?? []).map(route => (
-              <div key={route.id} className="flex items-center gap-2 bg-slate-700 rounded-xl px-3 py-2">
-                <div className="w-3 h-3 rounded-full shrink-0" style={{ background: route.color }} />
-                <span className="text-white text-sm flex-1 truncate">{route.name}</span>
-                <span className="text-slate-500 text-xs shrink-0">{(route.coords?.length ?? 0)} punten</span>
-                <button
-                  onClick={() => deleteRoute(event.id, route.id)}
-                  className="text-red-400 hover:text-white text-xs shrink-0 transition-colors"
-                >
-                  ✕
-                </button>
-              </div>
-            ))}
           </div>
 
           {/* Waypoints */}
@@ -446,6 +494,8 @@ function TeamsTab({ settings, setSettings }) {
 
   const add    = () => setTeams(t => [...t, { role: '', label: '' }]);
   const remove = (i) => setTeams(t => t.filter((_, idx) => idx !== i));
+  const moveUp   = (i) => setTeams(t => { const a = [...t]; [a[i-1], a[i]] = [a[i], a[i-1]]; return a; });
+  const moveDown = (i) => setTeams(t => { const a = [...t]; [a[i], a[i+1]] = [a[i+1], a[i]]; return a; });
 
   return (
     <div>
@@ -453,6 +503,10 @@ function TeamsTab({ settings, setSettings }) {
       <div className="flex flex-col gap-2 mb-3">
         {teams.map((team, i) => (
           <div key={i} className="flex gap-2 items-center bg-slate-800 rounded-xl px-3 py-2">
+            <div className="flex flex-col gap-0.5">
+              <button onClick={() => moveUp(i)}   disabled={i === 0}              className="text-slate-500 hover:text-white disabled:opacity-20 text-xs leading-none transition-colors">▲</button>
+              <button onClick={() => moveDown(i)} disabled={i === teams.length-1} className="text-slate-500 hover:text-white disabled:opacity-20 text-xs leading-none transition-colors">▼</button>
+            </div>
             <input
               value={team.role}
               onChange={e => update(i, 'role', e.target.value)}

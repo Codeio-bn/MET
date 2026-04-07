@@ -80,10 +80,13 @@ function MapPicker({ position, onChange }) {
 
 // ─── Incident card (with materials + close) ───────────────────────────────────
 
-function IncidentCard({ inc, materials, onClose }) {
-  const [supplies, setSupplies] = useState(() => emptySupplies(materials));
-  const [notes, setNotes]       = useState('');
-  const [closing, setClosing]   = useState(false);
+function IncidentCard({ inc, materials, onClose, onReject }) {
+  const [supplies, setSupplies]         = useState(() => emptySupplies(materials));
+  const [notes, setNotes]               = useState('');
+  const [closing, setClosing]           = useState(false);
+  const [showReject, setShowReject]     = useState(false);
+  const [rejectReason, setRejectReason] = useState('');
+  const [rejecting, setRejecting]       = useState(false);
   const color = PRIORITY_COLOR[inc.priority] || '#94a3b8';
 
   const handleClose = async () => {
@@ -97,6 +100,17 @@ function IncidentCard({ inc, materials, onClose }) {
     });
     onClose(inc.id);
     setClosing(false);
+  };
+
+  const handleReject = async () => {
+    setRejecting(true);
+    await fetch(`/api/incidents/${inc.id}/reject`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ team: inc.assigned_team, reason: rejectReason }),
+    });
+    onReject(inc.id);
+    setRejecting(false);
   };
 
   return (
@@ -157,8 +171,8 @@ function IncidentCard({ inc, materials, onClose }) {
         />
       </div>
 
-      {/* Close button */}
-      <div className="px-4 py-3">
+      {/* Close + reject buttons */}
+      <div className="px-4 py-3 flex flex-col gap-2">
         <button
           onClick={handleClose}
           disabled={closing}
@@ -166,6 +180,41 @@ function IncidentCard({ inc, materials, onClose }) {
         >
           {closing ? 'Afmelden…' : '✓ Melding afmelden'}
         </button>
+
+        {!showReject ? (
+          <button
+            onClick={() => setShowReject(true)}
+            className="w-full py-2 rounded-xl bg-slate-700 hover:bg-orange-800 text-slate-400 hover:text-white text-sm font-semibold transition-colors"
+          >
+            Afwijzen
+          </button>
+        ) : (
+          <div className="flex flex-col gap-2">
+            <textarea
+              value={rejectReason}
+              onChange={e => setRejectReason(e.target.value)}
+              rows={2}
+              placeholder="Reden (bijv. al onderweg naar andere melding)…"
+              className="w-full bg-slate-700 border border-orange-600 rounded-xl text-white text-sm px-3 py-2 focus:outline-none resize-none placeholder-slate-500"
+              autoFocus
+            />
+            <div className="flex gap-2">
+              <button
+                onClick={handleReject}
+                disabled={rejecting}
+                className="flex-1 py-2.5 rounded-xl bg-orange-700 hover:bg-orange-600 disabled:opacity-50 text-white font-bold text-sm transition-colors"
+              >
+                {rejecting ? 'Afwijzen…' : 'Bevestig afwijzing'}
+              </button>
+              <button
+                onClick={() => { setShowReject(false); setRejectReason(''); }}
+                className="px-4 py-2.5 rounded-xl bg-slate-700 hover:bg-slate-600 text-slate-300 text-sm transition-colors"
+              >
+                Annuleer
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -175,9 +224,10 @@ function IncidentCard({ inc, materials, onClose }) {
 
 const EVENT_CENTER = [51.5771791, 4.7351289];
 
-function NewIncidentForm({ myTeamLabel, activeEvent, onCreated, onCancel }) {
-  const [priority, setPriority] = useState('medium');
+function NewIncidentForm({ myTeamLabel, activeEvent, materials, onCreated, onCancel }) {
+  const [priority, setPriority]   = useState('medium');
   const [complaint, setComplaint] = useState('');
+  const [supplies, setSupplies]   = useState(() => emptySupplies(materials));
   const [gpsState, setGpsState]   = useState('idle');
   const [coords, setCoords]       = useState(null);
   const [showMap, setShowMap]     = useState(false);
@@ -194,12 +244,13 @@ function NewIncidentForm({ myTeamLabel, activeEvent, onCreated, onCancel }) {
   };
 
   const submit = async () => {
-    if (!complaint.trim()) return;
     setSending(true);
+    const supplyText = suppliesToText(supplies, materials);
+    const fullComplaint = [supplyText, complaint.trim()].filter(Boolean).join('\n');
     const payload = {
       reporter:      myTeamLabel || 'Team',
       priority,
-      complaint:     complaint.trim(),
+      complaint:     fullComplaint || null,
       lat:           coords?.[0] ?? null,
       lng:           coords?.[1] ?? null,
       assigned_team: myTeamLabel || undefined,
@@ -245,14 +296,43 @@ function NewIncidentForm({ myTeamLabel, activeEvent, onCreated, onCancel }) {
         </div>
       </div>
 
-      {/* Complaint */}
+      {/* Materials */}
       <div>
-        <p className="text-slate-500 text-xs font-semibold uppercase tracking-wider mb-2">Wat is er aan de hand?</p>
+        <p className="text-slate-500 text-xs font-semibold uppercase tracking-wider mb-2">Gebruikt materiaal</p>
+        <div className="grid grid-cols-3 gap-2">
+          {materials.map(({ key, label, icon }) => {
+            const count = supplies[key];
+            return (
+              <button
+                key={key}
+                onClick={() => setSupplies(s => ({ ...s, [key]: s[key] + 1 }))}
+                className={`relative flex flex-col items-center justify-center gap-1 h-14 rounded-xl transition-all active:scale-95
+                  ${count > 0 ? 'bg-blue-600 ring-2 ring-blue-400 text-white' : 'bg-slate-700 hover:bg-slate-600 text-slate-300'}`}
+              >
+                <span className="text-lg leading-none">{icon}</span>
+                <span className="text-xs font-semibold leading-none">{label}</span>
+                {count > 0 && <span className="absolute top-1 right-1.5 text-xs font-black">{count}x</span>}
+              </button>
+            );
+          })}
+        </div>
+        {Object.values(supplies).some(v => v > 0) && (
+          <button onClick={() => setSupplies(emptySupplies(materials))} className="mt-1.5 text-xs text-slate-500 hover:text-red-400 transition-colors">
+            Reset materiaal
+          </button>
+        )}
+      </div>
+
+      {/* Complaint — optional */}
+      <div>
+        <p className="text-slate-500 text-xs font-semibold uppercase tracking-wider mb-2">
+          Beschrijving <span className="normal-case font-normal text-slate-600">(optioneel)</span>
+        </p>
         <textarea
           value={complaint}
           onChange={e => setComplaint(e.target.value)}
-          rows={3}
-          placeholder="Beschrijf het incident…"
+          rows={2}
+          placeholder="Extra toelichting…"
           className="w-full bg-slate-700 border border-slate-600 rounded-xl text-white text-sm px-3 py-2 focus:outline-none focus:border-blue-500 resize-none placeholder-slate-500"
         />
       </div>
@@ -292,7 +372,7 @@ function NewIncidentForm({ myTeamLabel, activeEvent, onCreated, onCancel }) {
 
       <button
         onClick={submit}
-        disabled={sending || !complaint.trim()}
+        disabled={sending}
         className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white font-bold text-sm transition-colors"
       >
         {sending ? 'Verzenden…' : 'Melding aanmaken'}
@@ -310,6 +390,8 @@ export default function ReportView() {
   const [activeEvent, setActiveEvent] = useState(null);
   const [incidents, setIncidents]     = useState([]); // assigned to this team
   const [alertIncident, setAlertIncident] = useState(null); // incoming assignment overlay
+  const [alertRejectReason, setAlertRejectReason] = useState('');
+  const [alertShowReject, setAlertShowReject]     = useState(false);
   const [showNew, setShowNew]         = useState(false);
   const [queueCount, setQueueCount]   = useState(0);
   const soundUrlRef = useRef(null);
@@ -358,10 +440,11 @@ export default function ReportView() {
         setIncidents(prev => {
           const exists = prev.find(i => i.id === inc.id);
           if (exists) return prev.map(i => i.id === inc.id ? inc : i);
-          // newly assigned to us — show alert
+          // Newly assigned — skip alert if we reported it ourselves
+          if (inc.reporter === myTeamLabel) return [inc, ...prev];
           playAlert(soundUrlRef.current);
           setAlertIncident(inc);
-          return prev; // don't add yet; alert confirms it
+          return prev;
         });
       } else {
         setIncidents(prev => prev.filter(i => i.id !== inc.id));
@@ -370,9 +453,13 @@ export default function ReportView() {
 
     const handleNew = (inc) => {
       if (inc.assigned_team === myTeamLabel && inc.status === 'open') {
-        playAlert(soundUrlRef.current);
-        setAlertIncident(inc);
-        // don't add to list yet; user confirms via alert
+        if (inc.reporter === myTeamLabel) {
+          // Self-created — add directly without alert
+          setIncidents(prev => [inc, ...prev]);
+        } else {
+          playAlert(soundUrlRef.current);
+          setAlertIncident(inc);
+        }
       }
     };
 
@@ -392,9 +479,8 @@ export default function ReportView() {
     return () => { socket.disconnect(); window.removeEventListener('online', drainQueue); };
   }, [myTeamLabel]);
 
-  const handleClosed = useCallback((id) => {
-    setIncidents(prev => prev.filter(i => i.id !== id));
-  }, []);
+  const handleClosed   = useCallback((id) => setIncidents(prev => prev.filter(i => i.id !== id)), []);
+  const handleRejected = useCallback((id) => setIncidents(prev => prev.filter(i => i.id !== id)), []);
 
   return (
     <div className="page-enter min-h-screen bg-slate-900 flex flex-col items-center px-4 py-6 gap-4">
@@ -432,11 +518,56 @@ export default function ReportView() {
                 onClick={() => {
                   setIncidents(prev => [alertIncident, ...prev]);
                   setAlertIncident(null);
+                  setAlertShowReject(false);
+                  setAlertRejectReason('');
                 }}
                 className="mt-4 w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-sm transition-colors"
               >
                 Begrepen — melding oppakken
               </button>
+
+              {!alertShowReject ? (
+                <button
+                  onClick={() => setAlertShowReject(true)}
+                  className="mt-1 w-full py-2.5 rounded-xl bg-slate-800 hover:bg-orange-900 text-slate-400 hover:text-white text-sm font-semibold transition-colors"
+                >
+                  Afwijzen
+                </button>
+              ) : (
+                <div className="mt-1 flex flex-col gap-2">
+                  <textarea
+                    value={alertRejectReason}
+                    onChange={e => setAlertRejectReason(e.target.value)}
+                    rows={2}
+                    placeholder="Reden (bijv. al onderweg naar andere melding)…"
+                    className="w-full bg-slate-800 border border-orange-600 rounded-xl text-white text-sm px-3 py-2 focus:outline-none resize-none placeholder-slate-500"
+                    autoFocus
+                  />
+                  <div className="flex gap-2">
+                    <button
+                      onClick={async () => {
+                        await fetch(`/api/incidents/${alertIncident.id}/reject`, {
+                          method: 'PATCH',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ team: myTeamLabel, reason: alertRejectReason }),
+                        });
+                        setAlertIncident(null);
+                        setAlertShowReject(false);
+                        setAlertRejectReason('');
+                      }}
+                      className="flex-1 py-2.5 rounded-xl bg-orange-700 hover:bg-orange-600 text-white font-bold text-sm transition-colors"
+                    >
+                      Bevestig afwijzing
+                    </button>
+                    <button
+                      onClick={() => { setAlertShowReject(false); setAlertRejectReason(''); }}
+                      className="px-4 py-2.5 rounded-xl bg-slate-700 hover:bg-slate-600 text-slate-300 text-sm transition-colors"
+                    >
+                      Terug
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -491,6 +622,7 @@ export default function ReportView() {
           inc={inc}
           materials={materials}
           onClose={handleClosed}
+          onReject={handleRejected}
         />
       ))}
 
@@ -499,6 +631,7 @@ export default function ReportView() {
         <NewIncidentForm
           myTeamLabel={myTeamLabel || formatRole(role)}
           activeEvent={activeEvent}
+          materials={materials}
           onCreated={() => setShowNew(false)}
           onCancel={() => setShowNew(false)}
         />
