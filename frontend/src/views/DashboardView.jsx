@@ -45,6 +45,35 @@ function makeRouteEndIcon(type) {
 const START_ICON  = makeRouteEndIcon('start');
 const FINISH_ICON = makeRouteEndIcon('finish');
 
+function makeWaypointIcon(name) {
+  const letter = name ? name.charAt(0).toUpperCase() : '★';
+  return L.divIcon({
+    className: '',
+    html: `<div style="
+      position:relative;
+      width:22px;height:22px;
+    ">
+      <div style="
+        position:absolute;inset:0;
+        background:#f59e0b;
+        border:2px solid white;
+        box-shadow:0 2px 8px rgba(0,0,0,.55);
+        border-radius:50% 50% 50% 0;
+        transform:rotate(-45deg);
+      "></div>
+      <span style="
+        position:absolute;inset:0;
+        display:flex;align-items:center;justify-content:center;
+        font-size:9px;font-weight:900;color:white;font-family:sans-serif;
+        padding-bottom:2px;
+      ">${letter}</span>
+    </div>`,
+    iconSize:   [22, 22],
+    iconAnchor: [11, 22],
+    popupAnchor:[0, -24],
+  });
+}
+
 function makeIcon(priority, selected) {
   const color = PRIORITY_COLOR[priority] || '#94a3b8';
   const size  = selected ? 22 : 16;
@@ -116,6 +145,11 @@ export default function DashboardView() {
     .filter(e => activeEventId === null || e.id === activeEventId)
     .flatMap(e => (e.routes ?? []).map(r => ({ ...r, eventName: e.name, eventDate: e.date })));
 
+  // Waypoints filtered by active event
+  const waypoints = activeEventId === 'none' ? [] : events
+    .filter(e => activeEventId === null || e.id === activeEventId)
+    .flatMap(e => (e.waypoints ?? []).map(w => ({ ...w, eventName: e.name })));
+
   const soundUrl = settings?.sound?.type === 'custom'
     ? `/api/settings/uploads/${settings.sound.filename}`
     : null;
@@ -123,13 +157,12 @@ export default function DashboardView() {
   // ── Page title ──
   useEffect(() => { document.title = 'SMET – Dashboard'; }, []);
 
-  // ── Auto-select today's event (if one matches), otherwise no event ──
+  // ── Auto-select the active event on load, otherwise no event ──
   useEffect(() => {
-    if (!settings?.events?.length) return;
-    const today = new Date().toLocaleDateString('en-CA');
-    const todayEvent = settings.events.find(e => e.date === today);
-    setActiveEventId(todayEvent ? todayEvent.id : 'none');
-  }, [settings?.events]);
+    if (settings === null) return;
+    const ae = settings.active_event;
+    setActiveEventId(ae ? ae.id : 'none');
+  }, [settings?.active_event]);
 
   // ── Fetch all & open socket ──
   useEffect(() => {
@@ -750,6 +783,18 @@ export default function DashboardView() {
               </span>
             );
           })}
+
+          {waypoints.map(wp => (
+            <Marker key={wp.id} position={[wp.lat, wp.lng]} icon={makeWaypointIcon(wp.name)}>
+              <Popup>
+                <div style={{ minWidth: 140 }}>
+                  <p style={{ fontWeight: 'bold', marginBottom: 4 }}>{wp.name || '(naamloos)'}</p>
+                  {wp.sym && <p style={{ fontSize: 11, color: '#888' }}>{wp.sym}</p>}
+                  {wp.eventName && <p style={{ fontSize: 11, color: '#aaa', marginTop: 4 }}>{wp.eventName}</p>}
+                </div>
+              </Popup>
+            </Marker>
+          ))}
 
           {visibleIncidents.map((inc) =>
             inc.lat && inc.lng ? (

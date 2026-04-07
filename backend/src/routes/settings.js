@@ -82,6 +82,25 @@ function parseGPX(xml) {
   return coords;
 }
 
+function parseGPXWaypoints(xml) {
+  const waypoints = [];
+  const re = /<wpt\b[^>]*lat="([^"]+)"[^>]*lon="([^"]+)"[^>]*>([\s\S]*?)<\/wpt>/g;
+  let m;
+  while ((m = re.exec(xml)) !== null) {
+    const inner     = m[3];
+    const nameMatch = /<name>([^<]*)<\/name>/.exec(inner);
+    const symMatch  = /<sym>([^<]*)<\/sym>/.exec(inner);
+    waypoints.push({
+      id:   uuidv4(),
+      lat:  parseFloat(m[1]),
+      lng:  parseFloat(m[2]),
+      name: nameMatch ? nameMatch[1].trim() : '',
+      sym:  symMatch  ? symMatch[1].trim()  : '',
+    });
+  }
+  return waypoints;
+}
+
 function parseGeoJSON(text) {
   const gj = JSON.parse(text);
   const coords = [];
@@ -171,6 +190,44 @@ router.post('/events/:eventId/routes', upload.single('file'), async (req, res) =
 
     await set('events', s.events, req.io);
     res.json({ ok: true, coordCount: coords.length });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/settings/events/:eventId/waypoints  →  upload + parse GPX waypoints
+router.post('/events/:eventId/waypoints', upload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'Geen bestand ontvangen' });
+  const { eventId } = req.params;
+  try {
+    const ext = path.extname(req.file.originalname).toLowerCase();
+    if (ext !== '.gpx') return res.status(422).json({ error: 'Alleen GPX bestanden ondersteund voor waypoints' });
+    const content   = fs.readFileSync(req.file.path, 'utf8');
+    const waypoints = parseGPXWaypoints(content);
+    if (!waypoints.length) return res.status(422).json({ error: 'Geen waypoints (<wpt>) gevonden in bestand' });
+
+    const s     = await getAll();
+    const event = s.events.find(e => e.id === eventId);
+    if (!event) return res.status(404).json({ error: 'Evenement niet gevonden' });
+
+    (event.waypoints ??= []).push(...waypoints);
+    await set('events', s.events, req.io);
+    res.json({ ok: true, count: waypoints.length });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// DELETE /api/settings/events/:eventId/waypoints/:waypointId
+router.delete('/events/:eventId/waypoints/:waypointId', async (req, res) => {
+  const { eventId, waypointId } = req.params;
+  try {
+    const s     = await getAll();
+    const event = s.events.find(e => e.id === eventId);
+    if (!event) return res.status(404).json({ error: 'Evenement niet gevonden' });
+    event.waypoints = (event.waypoints ?? []).filter(w => w.id !== waypointId);
+    await set('events', s.events, req.io);
+    res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

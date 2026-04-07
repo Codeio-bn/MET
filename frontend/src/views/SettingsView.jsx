@@ -103,8 +103,12 @@ export default function SettingsView() {
 function EventsTab({ settings, setSettings }) {
   const [newName, setNewName]   = useState('');
   const [newDate, setNewDate]   = useState('');
-  const [uploading, setUploading] = useState(null); // eventId being uploaded to
-  const [routeForm, setRouteForm] = useState({}); // per-eventId form state
+  const [uploading, setUploading]   = useState(null); // eventId being uploaded to
+  const [routeForm, setRouteForm]   = useState({}); // per-eventId form state
+  const [waypointFile, setWaypointFile] = useState({}); // per-eventId file
+  const [uploadingWp, setUploadingWp]   = useState(null);
+  const [editingId, setEditingId]       = useState(null);
+  const [editFields, setEditFields]     = useState({});
 
   const saveEvents = useCallback(async (events) => {
     await fetch('/api/settings/events', {
@@ -131,6 +135,48 @@ function EventsTab({ settings, setSettings }) {
   const deleteEvent = useCallback(async (id) => {
     await saveEvents(settings.events.filter(e => e.id !== id));
   }, [settings.events, saveEvents]);
+
+  const startEdit = useCallback((event) => {
+    setEditingId(event.id);
+    setEditFields({ name: event.name, date: event.date || '' });
+  }, []);
+
+  const saveEdit = useCallback(async (id) => {
+    if (!editFields.name?.trim()) return;
+    const events = settings.events.map(e =>
+      e.id === id ? { ...e, name: editFields.name.trim(), date: editFields.date } : e
+    );
+    await saveEvents(events);
+    setEditingId(null);
+  }, [editFields, settings.events, saveEvents]);
+
+  const deleteWaypoint = useCallback(async (eventId, waypointId) => {
+    await fetch(`/api/settings/events/${eventId}/waypoints/${waypointId}`, { method: 'DELETE' });
+    setSettings(s => ({
+      ...s,
+      events: s.events.map(e =>
+        e.id === eventId ? { ...e, waypoints: (e.waypoints ?? []).filter(w => w.id !== waypointId) } : e
+      ),
+    }));
+  }, [setSettings]);
+
+  const uploadWaypoints = useCallback(async (eventId) => {
+    const file = waypointFile[eventId];
+    if (!file) return;
+    setUploadingWp(eventId);
+    const fd = new FormData();
+    fd.append('file', file);
+    try {
+      const res  = await fetch(`/api/settings/events/${eventId}/waypoints`, { method: 'POST', body: fd });
+      const data = await res.json();
+      if (!res.ok) return alert(data.error);
+      const fresh = await fetch('/api/settings').then(r => r.json());
+      setSettings(fresh);
+      setWaypointFile(f => ({ ...f, [eventId]: null }));
+    } finally {
+      setUploadingWp(null);
+    }
+  }, [waypointFile, setSettings]);
 
   const deleteRoute = useCallback(async (eventId, routeId) => {
     await fetch(`/api/settings/events/${eventId}/routes/${routeId}`, { method: 'DELETE' });
@@ -200,18 +246,58 @@ function EventsTab({ settings, setSettings }) {
       {settings.events.map(event => (
         <div key={event.id} className="bg-slate-800 rounded-2xl p-4 flex flex-col gap-3">
           {/* Event header */}
-          <div className="flex items-center justify-between gap-2">
-            <div>
-              <p className="text-white font-semibold">{event.name}</p>
-              {event.date && <p className="text-slate-400 text-xs">{new Date(event.date).toLocaleDateString('nl-NL', { dateStyle: 'long' })}</p>}
+          {editingId === event.id ? (
+            <div className="flex flex-col gap-2">
+              <input
+                value={editFields.name}
+                onChange={e => setEditFields(f => ({ ...f, name: e.target.value }))}
+                placeholder="Naam"
+                className="w-full bg-slate-700 border border-slate-600 rounded-xl px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+              />
+              <input
+                type="date"
+                value={editFields.date}
+                onChange={e => setEditFields(f => ({ ...f, date: e.target.value }))}
+                className="w-full bg-slate-700 border border-slate-600 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
+              />
+              <div className="flex gap-2">
+                <button
+                  onClick={() => saveEdit(event.id)}
+                  disabled={!editFields.name?.trim()}
+                  className="flex-1 py-1.5 rounded-lg text-xs font-bold bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white transition-colors"
+                >
+                  Opslaan
+                </button>
+                <button
+                  onClick={() => setEditingId(null)}
+                  className="flex-1 py-1.5 rounded-lg text-xs bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors"
+                >
+                  Annuleren
+                </button>
+              </div>
             </div>
-            <button
-              onClick={() => deleteEvent(event.id)}
-              className="text-xs text-red-400 hover:text-white bg-slate-700 hover:bg-red-700 px-2.5 py-1.5 rounded-lg transition-colors"
-            >
-              Verwijder
-            </button>
-          </div>
+          ) : (
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <p className="text-white font-semibold">{event.name}</p>
+                {event.date && <p className="text-slate-400 text-xs">{new Date(event.date).toLocaleDateString('nl-NL', { dateStyle: 'long' })}</p>}
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => startEdit(event)}
+                  className="text-xs text-slate-300 hover:text-white bg-slate-700 hover:bg-slate-600 px-2.5 py-1.5 rounded-lg transition-colors"
+                >
+                  Bewerk
+                </button>
+                <button
+                  onClick={() => deleteEvent(event.id)}
+                  className="text-xs text-red-400 hover:text-white bg-slate-700 hover:bg-red-700 px-2.5 py-1.5 rounded-lg transition-colors"
+                >
+                  Verwijder
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Routes */}
           <div className="flex flex-col gap-1.5">
@@ -232,6 +318,45 @@ function EventsTab({ settings, setSettings }) {
                 </button>
               </div>
             ))}
+          </div>
+
+          {/* Waypoints */}
+          <div className="flex flex-col gap-1.5">
+            <p className="text-slate-500 text-xs font-semibold uppercase tracking-wider">Bezienswaardigheden</p>
+            {(event.waypoints ?? []).length === 0 && (
+              <p className="text-slate-600 text-xs italic">Geen bezienswaardigheden</p>
+            )}
+            {(event.waypoints ?? []).map(wp => (
+              <div key={wp.id} className="flex items-center gap-2 bg-slate-700 rounded-xl px-3 py-2">
+                <span className="w-3 h-3 rounded-sm shrink-0 bg-amber-400" style={{ transform: 'rotate(45deg)' }} />
+                <span className="text-white text-sm flex-1 truncate">{wp.name || '(naamloos)'}</span>
+                {wp.sym && <span className="text-slate-400 text-xs shrink-0 truncate max-w-[40%]">{wp.sym}</span>}
+                <button
+                  onClick={() => deleteWaypoint(event.id, wp.id)}
+                  className="text-red-400 hover:text-white text-xs shrink-0 transition-colors"
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+          </div>
+
+          {/* Upload waypoints */}
+          <div className="border-t border-slate-700 pt-3 flex flex-col gap-2">
+            <p className="text-slate-500 text-xs font-semibold uppercase tracking-wider">Bezienswaardigheden uploaden (GPX)</p>
+            <input
+              type="file"
+              accept=".gpx"
+              onChange={e => setWaypointFile(f => ({ ...f, [event.id]: e.target.files[0] }))}
+              className="text-xs text-slate-400 file:mr-2 file:text-xs file:bg-slate-700 file:text-white file:border-0 file:rounded-lg file:px-2 file:py-1"
+            />
+            <button
+              onClick={() => uploadWaypoints(event.id)}
+              disabled={!waypointFile[event.id] || uploadingWp === event.id}
+              className="w-full py-2 rounded-xl text-xs font-bold bg-amber-700 hover:bg-amber-600 disabled:opacity-40 disabled:cursor-not-allowed text-white transition-colors"
+            >
+              {uploadingWp === event.id ? 'Verwerken…' : 'Bezienswaardigheden uploaden'}
+            </button>
           </div>
 
           {/* Upload route */}
