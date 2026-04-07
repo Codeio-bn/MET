@@ -247,6 +247,24 @@ router.delete('/events/:eventId/routes/:routeId', async (req, res) => {
     res.status(500).json({ error: e.message }); }
 });
 
+// POST /api/settings/import  →  restore a full settings backup
+router.post('/import', express.json({ limit: '50mb' }), async (req, res) => {
+  const allowed = ['events', 'teams', 'materials', 'active_event'];
+  const data    = req.body;
+  if (!data || typeof data !== 'object') {
+    return res.status(400).json({ error: 'Ongeldige backup-inhoud' });
+  }
+  try {
+    for (const key of allowed) {
+      if (key in data) await set(key, data[key], req.io);
+    }
+    // Sound is skipped — uploaded file won't be present on the target system
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Serve uploaded files
 router.get('/uploads/:filename', (req, res) => {
   const file = path.join(UPLOADS_DIR, path.basename(req.params.filename));

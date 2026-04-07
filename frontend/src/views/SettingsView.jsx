@@ -32,6 +32,7 @@ const TABS = [
   { id: 'teams',     label: 'Teams'       },
   { id: 'materials', label: 'Materialen'  },
   { id: 'sound',     label: 'Geluid'      },
+  { id: 'backup',    label: 'Backup'      },
 ];
 
 const ROUTE_COLORS = ['#3b82f6','#22c55e','#ef4444','#eab308','#a855f7','#f97316','#06b6d4','#ec4899'];
@@ -92,6 +93,7 @@ export default function SettingsView() {
           {tab === 'teams'     && <TeamsTab     settings={settings} setSettings={setSettings} />}
           {tab === 'materials' && <MaterialsTab settings={settings} setSettings={setSettings} />}
           {tab === 'sound'     && <SoundTab     settings={settings} setSettings={setSettings} />}
+          {tab === 'backup'    && <BackupTab    settings={settings} setSettings={setSettings} />}
         </div>
       </div>
     </div>
@@ -109,6 +111,7 @@ function EventsTab({ settings, setSettings }) {
   const [uploadingWp, setUploadingWp]   = useState(null);
   const [editingId, setEditingId]       = useState(null);
   const [editFields, setEditFields]     = useState({});
+  const [wpOpen, setWpOpen]             = useState(new Set());
 
   const saveEvents = useCallback(async (events) => {
     await fetch('/api/settings/events', {
@@ -322,23 +325,39 @@ function EventsTab({ settings, setSettings }) {
 
           {/* Waypoints */}
           <div className="flex flex-col gap-1.5">
-            <p className="text-slate-500 text-xs font-semibold uppercase tracking-wider">Bezienswaardigheden</p>
-            {(event.waypoints ?? []).length === 0 && (
-              <p className="text-slate-600 text-xs italic">Geen bezienswaardigheden</p>
+            <button
+              onClick={() => setWpOpen(s => {
+                const next = new Set(s);
+                next.has(event.id) ? next.delete(event.id) : next.add(event.id);
+                return next;
+              })}
+              className="flex items-center justify-between w-full text-left"
+            >
+              <p className="text-slate-500 text-xs font-semibold uppercase tracking-wider">
+                Bezienswaardigheden ({(event.waypoints ?? []).length})
+              </p>
+              <span className="text-slate-500 text-xs">{wpOpen.has(event.id) ? '▲' : '▼'}</span>
+            </button>
+            {wpOpen.has(event.id) && (
+              <>
+                {(event.waypoints ?? []).length === 0 && (
+                  <p className="text-slate-600 text-xs italic">Geen bezienswaardigheden</p>
+                )}
+                {(event.waypoints ?? []).map(wp => (
+                  <div key={wp.id} className="flex items-center gap-2 bg-slate-700 rounded-xl px-3 py-2">
+                    <span className="w-3 h-3 rounded-sm shrink-0 bg-amber-400" style={{ transform: 'rotate(45deg)' }} />
+                    <span className="text-white text-sm flex-1 truncate">{wp.name || '(naamloos)'}</span>
+                    {wp.sym && <span className="text-slate-400 text-xs shrink-0 truncate max-w-[40%]">{wp.sym}</span>}
+                    <button
+                      onClick={() => deleteWaypoint(event.id, wp.id)}
+                      className="text-red-400 hover:text-white text-xs shrink-0 transition-colors"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+              </>
             )}
-            {(event.waypoints ?? []).map(wp => (
-              <div key={wp.id} className="flex items-center gap-2 bg-slate-700 rounded-xl px-3 py-2">
-                <span className="w-3 h-3 rounded-sm shrink-0 bg-amber-400" style={{ transform: 'rotate(45deg)' }} />
-                <span className="text-white text-sm flex-1 truncate">{wp.name || '(naamloos)'}</span>
-                {wp.sym && <span className="text-slate-400 text-xs shrink-0 truncate max-w-[40%]">{wp.sym}</span>}
-                <button
-                  onClick={() => deleteWaypoint(event.id, wp.id)}
-                  className="text-red-400 hover:text-white text-xs shrink-0 transition-colors"
-                >
-                  ✕
-                </button>
-              </div>
-            ))}
           </div>
 
           {/* Upload waypoints */}
@@ -518,6 +537,101 @@ function MaterialsTab({ settings, setSettings }) {
         + Materiaal toevoegen
       </button>
       <SaveButton onClick={save} saving={saving} saved={saved} />
+    </div>
+  );
+}
+
+// ─── Backup tab ──────────────────────────────────────────────────────────────
+
+function BackupTab({ settings, setSettings }) {
+  const [importing, setImporting] = useState(false);
+  const [status,    setStatus]    = useState(null); // { ok: bool, msg: string }
+
+  const exportBackup = useCallback(() => {
+    const { sound, ...exportable } = settings;
+    const blob = new Blob(
+      [JSON.stringify({ ...exportable, sound: { type: 'default' } }, null, 2)],
+      { type: 'application/json' }
+    );
+    const date = new Date().toISOString().slice(0, 10);
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `smet-backup-${date}.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }, [settings]);
+
+  const importBackup = useCallback(async (e) => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    setImporting(true);
+    setStatus(null);
+    try {
+      const text = await file.text();
+      const data = JSON.parse(text);
+      const res  = await fetch('/api/settings/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      });
+      const result = await res.json();
+      if (!res.ok) {
+        setStatus({ ok: false, msg: result.error || 'Import mislukt' });
+        return;
+      }
+      const fresh = await fetch('/api/settings').then(r => r.json());
+      setSettings(fresh);
+      setStatus({ ok: true, msg: 'Backup succesvol hersteld.' });
+    } catch {
+      setStatus({ ok: false, msg: 'Ongeldig bestand of parsefout.' });
+    } finally {
+      setImporting(false);
+    }
+  }, [setSettings]);
+
+  return (
+    <div className="flex flex-col gap-6">
+      <SectionHeader>Exporteren &amp; importeren</SectionHeader>
+
+      {/* Export */}
+      <div className="bg-slate-800 rounded-2xl p-4 flex flex-col gap-3">
+        <p className="text-white font-semibold text-sm">Backup exporteren</p>
+        <p className="text-slate-400 text-xs">
+          Slaat alle evenementen (inclusief routes en bezienswaardigheden), teams en materialen op als één JSON-bestand.
+          Het notificatiegeluid wordt niet meegenomen.
+        </p>
+        <button
+          onClick={exportBackup}
+          className="w-full py-2.5 rounded-xl text-sm font-bold bg-blue-600 hover:bg-blue-500 text-white transition-colors"
+        >
+          Download backup (.json)
+        </button>
+      </div>
+
+      {/* Import */}
+      <div className="bg-slate-800 rounded-2xl p-4 flex flex-col gap-3">
+        <p className="text-white font-semibold text-sm">Backup importeren</p>
+        <p className="text-slate-400 text-xs">
+          Laad een eerder geëxporteerd JSON-bestand. De huidige instellingen worden overschreven.
+        </p>
+        <label className={`w-full py-2.5 rounded-xl text-sm font-bold text-center cursor-pointer transition-colors
+          ${importing ? 'bg-slate-700 text-slate-400 cursor-wait' : 'bg-amber-600 hover:bg-amber-500 text-white'}`}>
+          {importing ? 'Verwerken…' : 'Backup importeren (.json)'}
+          <input
+            type="file"
+            accept=".json"
+            className="hidden"
+            onChange={importBackup}
+            disabled={importing}
+          />
+        </label>
+        {status && (
+          <p className={`text-xs text-center font-semibold ${status.ok ? 'text-green-400' : 'text-red-400'}`}>
+            {status.msg}
+          </p>
+        )}
+      </div>
     </div>
   );
 }
