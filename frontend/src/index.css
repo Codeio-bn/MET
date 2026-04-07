@@ -1,0 +1,47 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+/* Prevent double-tap zoom on mobile buttons */
+button {
+  touch-action: manipulation;
+}
+
+/* ── Page & tab transition ───────────────────────── */
+@keyframes pageEnter {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0);    }
+}
+
+.page-enter {
+  animation: pageEnter 0.25s ease forwards;
+}
+
+@keyframes tabEnter {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0);   }
+}
+
+.tab-enter {
+  animation: tabEnter 0.2s ease forwards;
+}
+
+/* ── Live ping rings ─────────────────────────────── */
+@keyframes livePing {
+  0%   { transform: scale(1);   opacity: 0.6; }
+  100% { transform: scale(1.7); opacity: 0;   }
+}
+
+.live-ping {
+  animation: livePing 1.6s ease-out infinite;
+}
+
+.live-ping-delay {
+  animation: livePing 1.6s ease-out infinite 0.55s;
+}

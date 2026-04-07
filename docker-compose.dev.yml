@@ -1,0 +1,50 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: smet
+      POSTGRES_USER: smet
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-smet_secret}
+    volumes:
+      - ./data/db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U smet -d smet"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    restart: unless-stopped
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: smet
+      DB_USER: smet
+      DB_PASSWORD: ${DB_PASSWORD:-smet_secret}
+      PORT: 3000
+      UPLOADS_DIR: /app/uploads
+    volumes:
+      - ./backend/src:/app/src        # live reload
+      - ./data/uploads:/app/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    restart: unless-stopped
+    environment:
+      VITE_BACKEND_URL: http://backend:3000
+    volumes:
+      - ./frontend/src:/app/src        # HMR
+      - ./frontend/public:/app/public
+    ports:
+      - "3001:5173"
+    depends_on:
+      - backend
