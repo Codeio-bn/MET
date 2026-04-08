@@ -47,7 +47,7 @@ export default function SettingsView() {
   const [settings, setSettings] = useState(null);
 
   useEffect(() => {
-    document.title = 'SMET – Instellingen';
+    document.title = 'MET – Instellingen';
     fetch('/api/settings').then(r => r.json()).then(setSettings);
   }, []);
 
@@ -69,7 +69,7 @@ export default function SettingsView() {
         >
           ← Dashboard
         </button>
-        <h1 className="text-white font-bold text-lg">SMET – Instellingen</h1>
+        <h1 className="text-white font-bold text-lg">MET – Instellingen</h1>
       </div>
 
       {/* Tabs */}
@@ -666,7 +666,7 @@ function BackupTab({ settings, setSettings }) {
     const date = new Date().toISOString().slice(0, 10);
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `smet-backup-${date}.json`;
+    a.download = `met-backup-${date}.json`;
     a.click();
     URL.revokeObjectURL(a.href);
   }, [settings]);

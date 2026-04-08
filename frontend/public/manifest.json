@@ -1,7 +1,7 @@
 {
-  "name": "SMET – Medical Incident Tracker",
-  "short_name": "SMET",
-  "description": "Scouting Medical Emergency Tracker",
+  "name": "MET – Medical Incident Tracker",
+  "short_name": "MET",
+  "description": "Medical Emergency Tracker",
   "start_url": "/report",
   "display": "standalone",
   "background_color": "#0f172a",

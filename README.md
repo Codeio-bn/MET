@@ -1,4 +1,4 @@
-# SMET — Scouting Medical Incident Tracker
+# MET — Scouting Medical Incident Tracker
 
 Een snelle, gedecentraliseerde medische coördinatietool voor meerdaagse wandelevenementen met 1000+ deelnemers.
 
@@ -19,7 +19,7 @@ Een snelle, gedecentraliseerde medische coördinatietool voor meerdaagse wandele
 
 ## Overzicht
 
-SMET is gebouwd rond drie kernprincipes:
+MET is gebouwd rond drie kernprincipes:
 
 | Principe | Uitleg |
 |---|---|
@@ -83,6 +83,7 @@ SMET is gebouwd rond drie kernprincipes:
 - Responstijden per melding: aangenomen om · afgesloten om · minuten tot acceptatie
 - Omstandermeldingen herkenbaar via badge
 - Filters op status, evenement, team en zoekterm
+- **PDF exporteren** — via de beheerknop direct afdrukken of opslaan als PDF
 
 ---
 
@@ -106,8 +107,8 @@ SMET is gebouwd rond drie kernprincipes:
 
 ```bash
 # 1. Kloon de repository
-git clone https://github.com/jouw-gebruiker/smet.git
-cd smet
+git clone https://github.com/jouw-gebruiker/met.git
+cd met
 
 # 2. Maak een .env aan
 cp .env.example .env
@@ -205,7 +206,7 @@ CREATE TABLE settings (
 ## Projectstructuur
 
 ```
-smet/
+met/
 ├── backend/
 │   ├── src/
 │   │   ├── index.js              # Express + Socket.io server

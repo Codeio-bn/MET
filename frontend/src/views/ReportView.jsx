@@ -420,7 +420,7 @@ export default function ReportView() {
   }, []);
 
   useEffect(() => {
-    if (role) document.title = `SMET – ${formatRole(role)}`;
+    if (role) document.title = `MET – ${formatRole(role)}`;
   }, [role]);
 
   // ── Load settings ──
@@ -630,7 +630,7 @@ export default function ReportView() {
 
       {/* Header */}
       <div className="w-full max-w-lg">
-        <h1 className="text-white text-2xl font-bold tracking-wide">SMET</h1>
+        <h1 className="text-white text-2xl font-bold tracking-wide">MET</h1>
         {myTeamLabel ? (
           <p className="text-slate-400 text-sm mt-0.5">
             Ingelogd als <span className="text-white font-semibold">{myTeamLabel}</span>

@@ -46,7 +46,7 @@ export default function RapportageView() {
   const [searchText,  setSearchText]    = useState('');
 
   useEffect(() => {
-    document.title = 'SMET – Rapportage';
+    document.title = 'MET – Rapportage';
     fetch('/api/incidents').then(r => r.json()).then(setIncidents).catch(console.error);
     fetch('/api/settings').then(r => r.json()).then(setSettings).catch(console.error);
 
@@ -94,7 +94,7 @@ export default function RapportageView() {
 
       {/* Print-only title */}
       <div className="rapportage-print-title hidden">
-        SMET — Rapportage &nbsp;·&nbsp; {total} meldingen · {open} open · {closed} afgemeld
+        MET — Rapportage &nbsp;·&nbsp; {total} meldingen · {open} open · {closed} afgemeld
       </div>
 
       {/* Header */}

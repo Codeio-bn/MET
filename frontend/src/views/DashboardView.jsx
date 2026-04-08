@@ -218,7 +218,7 @@ export default function DashboardView() {
     : null;
 
   // ── Page title ──
-  useEffect(() => { document.title = 'SMET – Dashboard'; }, []);
+  useEffect(() => { document.title = 'MET – Dashboard'; }, []);
 
   // ── Relative-time ticker ──
   useEffect(() => {
@@ -450,7 +450,7 @@ export default function DashboardView() {
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Incidenten');
     const date = new Date().toISOString().slice(0, 10);
-    XLSX.writeFile(wb, `smet-incidenten-${date}.xlsx`);
+    XLSX.writeFile(wb, `met-incidenten-${date}.xlsx`);
   }, [incidents]);
 
   return (
@@ -470,7 +470,7 @@ export default function DashboardView() {
         <div className="bg-slate-900 border-b border-slate-700 shrink-0">
           <div className="px-4 py-3 flex items-center justify-between gap-3">
             <div className="min-w-0">
-              <h1 className="text-white font-bold text-lg tracking-wide leading-none">SMET</h1>
+              <h1 className="text-white font-bold text-lg tracking-wide leading-none">MET</h1>
               <div className="flex items-center gap-2 mt-1 flex-wrap">
                 <p className="text-slate-400 text-xs">
                   {openCount} open &bull; {visibleIncidents.length} zichtbaar

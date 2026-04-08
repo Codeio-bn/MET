@@ -65,7 +65,7 @@ async function start() {
       if (r.rows.length) Object.assign(teamStatuses, r.rows[0].value);
     } catch {}
     httpServer.listen(PORT, '0.0.0.0', () => {
-      console.log(`SMET backend listening on port ${PORT}`);
+      console.log(`MET backend listening on port ${PORT}`);
     });
   } catch (err) {
     console.error('Startup failed:', err);
