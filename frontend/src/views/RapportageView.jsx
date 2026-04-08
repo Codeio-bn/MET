@@ -12,16 +12,24 @@ function fmtDate(iso) {
   return new Date(iso).toLocaleDateString('nl-NL', { weekday: 'short', day: 'numeric', month: 'short' });
 }
 
-// ─── Parse materials by matching known labels anywhere in the complaint ────────
+// ─── Aggregate materials — prefer structured JSONB, fallback to text parsing ───
 function aggregateMaterials(incidents, materials) {
   const totals = {};
   if (!materials?.length) return totals;
   for (const inc of incidents) {
-    if (inc.status !== 'closed' || !inc.complaint) continue;
-    for (const { label } of materials) {
-      const re = new RegExp(`(\\d+)x\\s+${label}`, 'g');
-      for (const m of inc.complaint.matchAll(re)) {
-        totals[label] = (totals[label] || 0) + parseInt(m[1]);
+    if (inc.status !== 'closed') continue;
+    // Use structured materials_used if available
+    if (Array.isArray(inc.materials_used) && inc.materials_used.length > 0) {
+      for (const { label, count } of inc.materials_used) {
+        if (count > 0) totals[label] = (totals[label] || 0) + count;
+      }
+    } else if (inc.complaint) {
+      // Fallback: parse text
+      for (const { label } of materials) {
+        const re = new RegExp(`(\\d+)x\\s+${label}`, 'g');
+        for (const m of inc.complaint.matchAll(re)) {
+          totals[label] = (totals[label] || 0) + parseInt(m[1]);
+        }
       }
     }
   }
@@ -32,9 +40,10 @@ export default function RapportageView() {
   const navigate = useNavigate();
   const [incidents, setIncidents]   = useState([]);
   const [settings,  setSettings]    = useState(null);
-  const [eventFilter, setEventFilter] = useState(null); // null = all
-  const [teamFilter,  setTeamFilter]  = useState(null); // null = all
-  const [statusFilter, setStatusFilter] = useState('all'); // all | open | closed
+  const [eventFilter, setEventFilter]   = useState(null);
+  const [teamFilter,  setTeamFilter]    = useState(null);
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [searchText,  setSearchText]    = useState('');
 
   useEffect(() => {
     document.title = 'SMET – Rapportage';
@@ -61,6 +70,12 @@ export default function RapportageView() {
     if (teamFilter   != null && inc.assigned_team !== teamFilter)  return false;
     if (statusFilter === 'open'   && inc.status !== 'open')        return false;
     if (statusFilter === 'closed' && inc.status !== 'closed')      return false;
+    if (searchText.trim()) {
+      const q = searchText.toLowerCase();
+      if (!(inc.reporter   || '').toLowerCase().includes(q) &&
+          !(inc.complaint  || '').toLowerCase().includes(q) &&
+          !(inc.event_name || '').toLowerCase().includes(q)) return false;
+    }
     return true;
   });
 
@@ -68,6 +83,11 @@ export default function RapportageView() {
   const total  = filtered.length;
   const open   = filtered.filter(i => i.status === 'open').length;
   const closed = filtered.filter(i => i.status === 'closed').length;
+  const byPriority = {
+    high:   filtered.filter(i => i.priority === 'high').length,
+    medium: filtered.filter(i => i.priority === 'medium').length,
+    low:    filtered.filter(i => i.priority === 'low').length,
+  };
 
   return (
     <div className="page-enter min-h-screen bg-slate-950 flex flex-col">
@@ -77,6 +97,11 @@ export default function RapportageView() {
         <div>
           <h1 className="text-white font-bold text-lg">Rapportage</h1>
           <p className="text-slate-500 text-xs mt-0.5">{total} meldingen · {open} open · {closed} afgemeld</p>
+          <div className="flex gap-2 mt-1.5">
+            {byPriority.high   > 0 && <span className="text-xs font-bold px-1.5 py-0.5 rounded bg-red-500/20 text-red-400">🔴 Hoog: {byPriority.high}</span>}
+            {byPriority.medium > 0 && <span className="text-xs font-bold px-1.5 py-0.5 rounded bg-yellow-500/20 text-yellow-400">🟡 Mid: {byPriority.medium}</span>}
+            {byPriority.low    > 0 && <span className="text-xs font-bold px-1.5 py-0.5 rounded bg-green-500/20 text-green-400">🟢 Laag: {byPriority.low}</span>}
+          </div>
         </div>
         <button
           onClick={() => navigate('/dashboard')}
@@ -88,6 +113,14 @@ export default function RapportageView() {
 
       {/* Filters */}
       <div className="bg-slate-900 border-b border-slate-800 px-4 py-3 flex flex-col gap-2">
+
+        {/* Search */}
+        <input
+          value={searchText}
+          onChange={e => setSearchText(e.target.value)}
+          placeholder="Zoek op naam, melding of evenement…"
+          className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+        />
 
         {/* Status */}
         <div className="flex gap-2">
@@ -243,6 +276,9 @@ export default function RapportageView() {
                       style={{ background: color + '22', color: inc.status === 'closed' ? '#64748b' : color }}>
                       {PRIORITY_LABEL[inc.priority]}
                     </span>
+                    {inc.source === 'public' && (
+                      <span className="text-xs font-semibold text-amber-400 bg-amber-900/30 px-1.5 py-0.5 rounded">👥 Omstander</span>
+                    )}
                     {inc.status === 'closed' && (
                       <span className="text-xs font-semibold text-green-600 bg-green-900/30 px-1.5 py-0.5 rounded">✓ Afgemeld</span>
                     )}
@@ -261,6 +297,23 @@ export default function RapportageView() {
                     <span className="text-white text-sm font-semibold">{inc.reporter}</span>
                     <span className="text-slate-600 text-xs">{fmtDate(inc.created_at)} · {fmtTime(inc.created_at)}</span>
                   </div>
+
+                  {/* Response times */}
+                  {(inc.accepted_at || inc.closed_at) && (
+                    <div className="flex gap-3 mt-0.5">
+                      {inc.accepted_at && (
+                        <span className="text-xs text-green-600">
+                          Aangenomen {fmtTime(inc.accepted_at)}
+                          {' '}({Math.round((new Date(inc.accepted_at) - new Date(inc.created_at)) / 60000)} min)
+                        </span>
+                      )}
+                      {inc.closed_at && (
+                        <span className="text-xs text-slate-500">
+                          Afgesloten {fmtTime(inc.closed_at)}
+                        </span>
+                      )}
+                    </div>
+                  )}
 
                   {/* Event */}
                   {inc.event_name && (

@@ -92,11 +92,12 @@ export default function PublicReportView() {
     const payload = {
       reporter:   name.trim() || 'Omstander',
       priority:   urgent ? 'high' : 'medium',
-      complaint:     description.trim() || undefined,
-      lat:           location?.[0] ?? undefined,
-      lng:           location?.[1] ?? undefined,
-      event_id:      activeEvent?.id   ?? undefined,
-      event_name:    activeEvent?.name ?? undefined,
+      complaint:  description.trim() || undefined,
+      lat:        location?.[0] ?? undefined,
+      lng:        location?.[1] ?? undefined,
+      event_id:   activeEvent?.id   ?? undefined,
+      event_name: activeEvent?.name ?? undefined,
+      source:     'public',
     };
     try {
       const res = await fetch('/api/incidents', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });

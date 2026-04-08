@@ -18,7 +18,7 @@ router.get('/', async (req, res) => {
 
 // POST new incident
 router.post('/', async (req, res) => {
-  const { reporter, priority, complaint, lat, lng, event_id, event_name, assigned_team } = req.body;
+  const { reporter, priority, complaint, lat, lng, event_id, event_name, assigned_team, source, materials_used } = req.body;
 
   if (!reporter || !priority) {
     return res.status(400).json({ error: 'reporter and priority are required' });
@@ -28,12 +28,25 @@ router.post('/', async (req, res) => {
   }
 
   const id = uuidv4();
+  const history = assigned_team
+    ? [{ type: 'assigned', team: assigned_team, timestamp: new Date().toISOString() }]
+    : [];
+
   try {
     const result = await pool.query(
-      `INSERT INTO incidents (id, reporter, priority, status, complaint, lat, lng, event_id, event_name, assigned_team)
-       VALUES ($1, $2, $3, 'open', $4, $5, $6, $7, $8, $9)
+      `INSERT INTO incidents
+         (id, reporter, priority, status, complaint, lat, lng, event_id, event_name,
+          assigned_team, source, materials_used, assignment_history)
+       VALUES ($1, $2, $3, 'open', $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12::jsonb)
        RETURNING *`,
-      [id, reporter, priority, complaint || null, lat || null, lng || null, event_id || null, event_name || null, assigned_team || null]
+      [
+        id, reporter, priority,
+        complaint || null, lat || null, lng || null,
+        event_id || null, event_name || null, assigned_team || null,
+        source || 'team',
+        JSON.stringify(Array.isArray(materials_used) ? materials_used : []),
+        JSON.stringify(history),
+      ]
     );
     const incident = result.rows[0];
     req.io.emit('new_incident', incident);
@@ -44,15 +57,35 @@ router.post('/', async (req, res) => {
   }
 });
 
+// PATCH /:id/eta — set/clear ETA text
+router.patch('/:id/eta', async (req, res) => {
+  const { eta } = req.body;
+  try {
+    const result = await pool.query(
+      'UPDATE incidents SET eta_text = $1 WHERE id = $2 RETURNING *',
+      [eta?.trim() || null, req.params.id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Incident not found' });
+    const incident = result.rows[0];
+    req.io.emit('incident_updated', incident);
+    res.json(incident);
+  } catch (err) {
+    console.error('PATCH /incidents/:id/eta error:', err.message);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
 // PATCH /:id/reject — team rejects the assignment
 router.patch('/:id/reject', async (req, res) => {
   const { team, reason } = req.body;
+  const entry = { type: 'rejected', team: team || null, reason: reason?.trim() || null, timestamp: new Date().toISOString() };
   try {
     const result = await pool.query(
       `UPDATE incidents
-       SET assigned_team = NULL, rejected_by = $2, rejection_reason = $3
+       SET assigned_team = NULL, rejected_by = $2, rejection_reason = $3,
+           assignment_history = COALESCE(assignment_history, '[]'::jsonb) || $4::jsonb
        WHERE id = $1 RETURNING *`,
-      [req.params.id, team || null, reason?.trim() || null]
+      [req.params.id, team || null, reason?.trim() || null, JSON.stringify([entry])]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Incident not found' });
     const incident = result.rows[0];
@@ -64,13 +97,42 @@ router.patch('/:id/reject', async (req, res) => {
   }
 });
 
+// PATCH /:id/accept — team accepts/acknowledges the assignment
+router.patch('/:id/accept', async (req, res) => {
+  const { team, eta } = req.body;
+  const now = new Date().toISOString();
+  const entry = { type: 'accepted', team: team || null, timestamp: now, eta: eta?.trim() || null };
+  try {
+    const result = await pool.query(
+      `UPDATE incidents
+       SET accepted_at = $2, eta_text = COALESCE($3, eta_text),
+           assignment_history = COALESCE(assignment_history, '[]'::jsonb) || $4::jsonb
+       WHERE id = $1 RETURNING *`,
+      [req.params.id, now, eta?.trim() || null, JSON.stringify([entry])]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Incident not found' });
+    const incident = result.rows[0];
+    req.io.emit('incident_updated', incident);
+    res.json(incident);
+  } catch (err) {
+    console.error('PATCH /incidents/:id/accept error:', err.message);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
 // PATCH /:id/assign — assign or unassign a team
 router.patch('/:id/assign', async (req, res) => {
   const { team } = req.body;
+  const entry = team
+    ? { type: 'assigned', team, timestamp: new Date().toISOString() }
+    : { type: 'unassigned', timestamp: new Date().toISOString() };
   try {
     const result = await pool.query(
-      'UPDATE incidents SET assigned_team = $1 WHERE id = $2 RETURNING *',
-      [team || null, req.params.id]
+      `UPDATE incidents
+       SET assigned_team = $1, accepted_at = NULL,
+           assignment_history = COALESCE(assignment_history, '[]'::jsonb) || $3::jsonb
+       WHERE id = $2 RETURNING *`,
+      [team || null, req.params.id, JSON.stringify([entry])]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Incident not found' });
     const incident = result.rows[0];
@@ -84,19 +146,33 @@ router.patch('/:id/assign', async (req, res) => {
 
 // PATCH /:id/close — mark incident as closed, optionally append notes to complaint
 router.patch('/:id/close', async (req, res) => {
-  const { notes } = req.body || {};
+  const { notes, materials_used } = req.body || {};
+  const now = new Date().toISOString();
+  const entry = { type: 'closed', timestamp: now };
   try {
-    const result = await pool.query(
-      notes?.trim()
-        ? `UPDATE incidents SET status = 'closed',
-             complaint = CASE WHEN complaint IS NULL OR complaint = ''
-               THEN $2
-               ELSE complaint || E'\n\n' || $2
-             END
-           WHERE id = $1 RETURNING *`
-        : `UPDATE incidents SET status = 'closed' WHERE id = $1 RETURNING *`,
-      notes?.trim() ? [req.params.id, notes.trim()] : [req.params.id]
-    );
+    let query, params;
+    if (notes?.trim()) {
+      query = `UPDATE incidents
+               SET status = 'closed', closed_at = $2,
+                   complaint = CASE WHEN complaint IS NULL OR complaint = ''
+                     THEN $3 ELSE complaint || E'\n\n' || $3 END,
+                   materials_used = CASE WHEN $4::jsonb != '[]'::jsonb THEN $4::jsonb ELSE materials_used END,
+                   assignment_history = COALESCE(assignment_history, '[]'::jsonb) || $5::jsonb
+               WHERE id = $1 RETURNING *`;
+      params = [req.params.id, now, notes.trim(),
+                JSON.stringify(Array.isArray(materials_used) ? materials_used : []),
+                JSON.stringify([entry])];
+    } else {
+      query = `UPDATE incidents
+               SET status = 'closed', closed_at = $2,
+                   materials_used = CASE WHEN $3::jsonb != '[]'::jsonb THEN $3::jsonb ELSE materials_used END,
+                   assignment_history = COALESCE(assignment_history, '[]'::jsonb) || $4::jsonb
+               WHERE id = $1 RETURNING *`;
+      params = [req.params.id, now,
+                JSON.stringify(Array.isArray(materials_used) ? materials_used : []),
+                JSON.stringify([entry])];
+    }
+    const result = await pool.query(query, params);
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Incident not found' });
     }
@@ -105,6 +181,31 @@ router.patch('/:id/close', async (req, res) => {
     res.json(incident);
   } catch (err) {
     console.error('PATCH /incidents/:id/close error:', err.message);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// PATCH /:id/location — update the GPS location (coordinator correction)
+router.patch('/:id/location', async (req, res) => {
+  const { lat, lng } = req.body;
+  if (lat == null || lng == null) {
+    return res.status(400).json({ error: 'lat and lng are required' });
+  }
+  const entry = { type: 'location_updated', timestamp: new Date().toISOString() };
+  try {
+    const result = await pool.query(
+      `UPDATE incidents
+       SET lat = $2, lng = $3,
+           assignment_history = COALESCE(assignment_history, '[]'::jsonb) || $4::jsonb
+       WHERE id = $1 RETURNING *`,
+      [req.params.id, lat, lng, JSON.stringify([entry])]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Incident not found' });
+    const incident = result.rows[0];
+    req.io.emit('incident_updated', incident);
+    res.json(incident);
+  } catch (err) {
+    console.error('PATCH /incidents/:id/location error:', err.message);
     res.status(500).json({ error: 'Database error' });
   }
 });

@@ -45,3 +45,18 @@ button {
 .live-ping-delay {
   animation: livePing 1.6s ease-out infinite 0.55s;
 }
+
+/* ── Tablet optimizations ────────────────────────── */
+/* Ensure minimum touch target height */
+.touch-target {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Smooth scrolling for touch */
+.scroll-touch {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { playAlert } from '../lib/alert';
+import QRCode from 'qrcode';
 
 // ─── Reusable small components ───────────────────────────────────────────────
 
@@ -17,7 +18,7 @@ function SaveButton({ onClick, saving, saved }) {
     <button
       onClick={onClick}
       disabled={saving}
-      className={`mt-3 w-full py-2.5 rounded-xl text-sm font-bold transition-colors
+      className={`mt-3 w-full py-3.5 rounded-xl text-sm font-bold transition-colors
         ${saved   ? 'bg-green-600 text-white' :
           saving  ? 'bg-slate-700 text-slate-400 cursor-wait' :
                     'bg-blue-600 hover:bg-blue-500 text-white'}`}
@@ -32,6 +33,7 @@ const TABS = [
   { id: 'teams',     label: 'Teams'       },
   { id: 'materials', label: 'Materialen'  },
   { id: 'sound',     label: 'Geluid'      },
+  { id: 'links',     label: 'Links'       },
   { id: 'backup',    label: 'Backup'      },
 ];
 
@@ -76,7 +78,7 @@ export default function SettingsView() {
           <button
             key={t.id}
             onClick={() => setTab(t.id)}
-            className={`flex-1 py-3 text-sm font-semibold transition-colors border-b-2
+            className={`flex-1 py-4 text-sm font-semibold transition-colors border-b-2
               ${tab === t.id
                 ? 'border-blue-500 text-white'
                 : 'border-transparent text-slate-400 hover:text-slate-200'}`}
@@ -93,6 +95,7 @@ export default function SettingsView() {
           {tab === 'teams'     && <TeamsTab     settings={settings} setSettings={setSettings} />}
           {tab === 'materials' && <MaterialsTab settings={settings} setSettings={setSettings} />}
           {tab === 'sound'     && <SoundTab     settings={settings} setSettings={setSettings} />}
+          {tab === 'links'     && <LinksTab     settings={settings} />}
           {tab === 'backup'    && <BackupTab    settings={settings} setSettings={setSettings} />}
         </div>
       </div>
@@ -231,13 +234,13 @@ function EventsTab({ settings, setSettings }) {
             value={newName}
             onChange={e => setNewName(e.target.value)}
             placeholder="Naam (bijv. Dag 1)"
-            className="w-full bg-slate-800 border border-slate-600 rounded-xl px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+            className="w-full bg-slate-800 border border-slate-600 rounded-xl px-3 py-3 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
           />
           <input
             type="date"
             value={newDate}
             onChange={e => setNewDate(e.target.value)}
-            className="w-full bg-slate-800 border border-slate-600 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
+            className="w-full bg-slate-800 border border-slate-600 rounded-xl px-3 py-3 text-sm text-white focus:outline-none focus:border-blue-500"
           />
           <button
             onClick={addEvent}
@@ -263,13 +266,13 @@ function EventsTab({ settings, setSettings }) {
                 value={editFields.name}
                 onChange={e => setEditFields(f => ({ ...f, name: e.target.value }))}
                 placeholder="Naam"
-                className="w-full bg-slate-700 border border-slate-600 rounded-xl px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                className="w-full bg-slate-700 border border-slate-600 rounded-xl px-3 py-3 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
               />
               <input
                 type="date"
                 value={editFields.date}
                 onChange={e => setEditFields(f => ({ ...f, date: e.target.value }))}
-                className="w-full bg-slate-700 border border-slate-600 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
+                className="w-full bg-slate-700 border border-slate-600 rounded-xl px-3 py-3 text-sm text-white focus:outline-none focus:border-blue-500"
               />
               <div className="flex gap-2">
                 <button
@@ -591,6 +594,59 @@ function MaterialsTab({ settings, setSettings }) {
         + Materiaal toevoegen
       </button>
       <SaveButton onClick={save} saving={saving} saved={saved} />
+    </div>
+  );
+}
+
+// ─── Links & QR tab ──────────────────────────────────────────────────────────
+
+function LinksTab({ settings }) {
+  const [qrUrls, setQrUrls] = useState({});
+  const teams = settings?.teams ?? [];
+  const origin = window.location.origin;
+
+  const allLinks = [
+    ...teams.map(({ role, label }) => ({ key: role, label, url: `${origin}/report?role=${role}` })),
+    { key: '__meld', label: 'Omstander melding (/meld)', url: `${origin}/meld` },
+  ];
+
+  useEffect(() => {
+    Promise.all(
+      allLinks.map(({ key, url }) =>
+        QRCode.toDataURL(url, { margin: 1, width: 160, color: { dark: '#ffffff', light: '#1e293b' } })
+          .then(dataUrl => [key, dataUrl])
+      )
+    ).then(entries => setQrUrls(Object.fromEntries(entries)));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [teams.length]);
+
+  return (
+    <div className="flex flex-col gap-6">
+      <SectionHeader>Rapportagelinks & QR-codes</SectionHeader>
+      <p className="text-slate-400 text-xs -mt-4">
+        Print of deel deze QR-codes voor gebruik op het evenement. Teams scannen hun eigen code,
+        omstanders de Omstander-code.
+      </p>
+
+      <div className="grid grid-cols-2 gap-4">
+        {allLinks.map(({ key, label, url }) => (
+          <div key={key} className="bg-slate-800 rounded-2xl p-4 flex flex-col items-center gap-3">
+            {qrUrls[key]
+              ? <img src={qrUrls[key]} alt={label} className="rounded-xl" style={{ width: 160, height: 160 }} />
+              : <div className="w-40 h-40 bg-slate-700 rounded-xl flex items-center justify-center text-slate-500 text-xs">Laden…</div>
+            }
+            <p className="text-white text-xs font-semibold text-center">{label}</p>
+            <a
+              href={url}
+              target="_blank"
+              rel="noreferrer"
+              className="text-blue-400 text-xs underline break-all text-center"
+            >
+              {url}
+            </a>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

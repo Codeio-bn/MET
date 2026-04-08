@@ -1,12 +1,12 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { MapContainer, TileLayer, Marker, Popup, Polyline, useMap } from 'react-leaflet';
+import { MapContainer, TileLayer, Marker, Popup, Polyline, useMap, useMapEvents } from 'react-leaflet';
 import MarkerClusterGroup from 'react-leaflet-cluster';
 import L from 'leaflet';
 import { io } from 'socket.io-client';
 import QRCode from 'qrcode';
 import * as XLSX from 'xlsx';
-import { playAlert } from '../lib/alert';
+import { playAlert, playAlertSoft } from '../lib/alert';
 
 // ─── Leaflet marker fix ──────────────────────────────────────────────────────
 // Vite doesn't bundle Leaflet's default PNGs; we use custom divIcons instead.
@@ -110,11 +110,52 @@ function MapController({ selectedId, incidents }) {
   return null;
 }
 
-// ─── Timestamp formatter ─────────────────────────────────────────────────────
+// ─── Map location picker (for coordinator pin correction) ─────────────────────
+
+const EDIT_PIN_ICON = L.divIcon({
+  className: '',
+  html: `<div style="width:28px;height:28px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);background:#f59e0b;border:3px solid white;box-shadow:0 2px 8px rgba(0,0,0,.5)"></div>`,
+  iconSize: [28, 28], iconAnchor: [14, 28],
+});
+
+function MapLocationPicker({ position, onChange }) {
+  useMapEvents({ click: e => onChange([e.latlng.lat, e.latlng.lng]) });
+  return position
+    ? <Marker position={position} icon={EDIT_PIN_ICON} draggable
+        eventHandlers={{ dragend: e => onChange([e.target.getLatLng().lat, e.target.getLatLng().lng]) }} />
+    : null;
+}
+
+// ─── Audit log type labels ────────────────────────────────────────────────────
+
+const AUDIT_LABEL = {
+  assigned:         (e) => `Toegewezen aan ${e.team}`,
+  unassigned:       ()  => 'Toewijzing verwijderd',
+  accepted:         (e) => `Aangenomen door ${e.team}${e.eta ? ` · ETA ${e.eta}` : ''}`,
+  rejected:         (e) => `Afgewezen door ${e.team}${e.reason ? `: ${e.reason}` : ''}`,
+  closed:           ()  => 'Melding afgesloten',
+  location_updated: ()  => 'Locatie gecorrigeerd',
+};
+
+function fmtAuditTime(iso) {
+  return new Date(iso).toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+// ─── Timestamp formatters ─────────────────────────────────────────────────────
 
 function fmtTime(iso) {
   return new Date(iso).toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit' });
 }
+
+function fmtRelative(iso) {
+  const diff = Math.floor((Date.now() - new Date(iso)) / 1000);
+  if (diff < 60)   return 'zojuist';
+  if (diff < 3600) return `${Math.floor(diff / 60)} min geleden`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)} uur geleden`;
+  return fmtTime(iso);
+}
+
+const STATUS_COLOR = { beschikbaar: '#22c55e', onderweg: '#eab308', bezet: '#ef4444' };
 
 // ─── Main component ──────────────────────────────────────────────────────────
 
@@ -144,10 +185,23 @@ export default function DashboardView() {
   const [showFilter, setShowFilter]           = useState(false);
   const [qrUrls, setQrUrls]                   = useState({});
   const [qrModal, setQrModal]                 = useState(null); // { label, key }
+  const [detailInc, setDetailInc]             = useState(null);
+  const [searchText, setSearchText]           = useState('');
+  const [hideClosed, setHideClosed]           = useState(false);
+  const [teamStatuses, setTeamStatuses]       = useState({});
+  const [tick, setTick]                       = useState(0);
+  const [editLocationId, setEditLocationId]   = useState(null); // incId being pin-moved
+  const [editLocationPos, setEditLocationPos] = useState(null); // [lat, lng]
+  const feedRef                               = useRef(null);
   const listRefs = useRef({});
 
   const teams  = settings?.teams ?? FALLBACK_TEAMS;
-  const events = settings?.events ?? [];
+  const events = (settings?.events ?? []).slice().sort((a, b) => {
+    if (!a.date && !b.date) return 0;
+    if (!a.date) return 1;
+    if (!b.date) return -1;
+    return a.date.localeCompare(b.date);
+  });
 
   // Routes filtered by active event (null = all, 'none' = geen, id = specific)
   const routes = activeEventId === 'none' ? [] : events
@@ -165,6 +219,12 @@ export default function DashboardView() {
 
   // ── Page title ──
   useEffect(() => { document.title = 'SMET – Dashboard'; }, []);
+
+  // ── Relative-time ticker ──
+  useEffect(() => {
+    const id = setInterval(() => setTick(t => t + 1), 30_000);
+    return () => clearInterval(id);
+  }, []);
 
   // ── Auto-select the active event on load, otherwise no event ──
   useEffect(() => {
@@ -186,8 +246,17 @@ export default function DashboardView() {
         playAlert(soundUrl);
         setFlash(inc.id);
         setTimeout(() => setFlash(null), 3000);
+      } else if (inc.priority === 'medium') {
+        playAlertSoft();
       }
+      // Auto-scroll feed to top
+      setTimeout(() => feedRef.current?.scrollTo({ top: 0, behavior: 'smooth' }), 50);
     });
+
+    socket.on('team_statuses',        (statuses) => setTeamStatuses(statuses));
+    socket.on('team_status_updated',  ({ label, status }) =>
+      setTeamStatuses(prev => ({ ...prev, [label]: status }))
+    );
 
     socket.on('incident_updated', (updated) => {
       setIncidents((prev) => prev.map((i) => (i.id === updated.id ? updated : i)));
@@ -283,6 +352,23 @@ export default function DashboardView() {
     setAssigningId(null);
   }, []);
 
+  const saveLocation = useCallback(async (incId, lat, lng) => {
+    try {
+      const res = await fetch(`/api/incidents/${incId}/location`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lat, lng }),
+      });
+      if (res.ok) {
+        const updated = await res.json();
+        setIncidents(prev => prev.map(i => i.id === updated.id ? updated : i));
+        setDetailInc(updated);
+      }
+    } catch (err) { console.error(err); }
+    setEditLocationId(null);
+    setEditLocationPos(null);
+  }, []);
+
   // Generate QR codes when links panel opens
   useEffect(() => {
     if (!showLinks) return;
@@ -319,10 +405,24 @@ export default function DashboardView() {
 
   const visibleIncidents = eventFiltered
     .filter(inc => !filterPriority || inc.priority === filterPriority)
-    .filter(inc => !filterTeam    || inc.assigned_team === filterTeam);
+    .filter(inc => !filterTeam    || inc.assigned_team === filterTeam)
+    .filter(inc => !hideClosed    || inc.status !== 'closed')
+    .filter(inc => {
+      if (!searchText.trim()) return true;
+      const q = searchText.toLowerCase();
+      return (inc.reporter   || '').toLowerCase().includes(q)
+          || (inc.complaint  || '').toLowerCase().includes(q)
+          || (inc.event_name || '').toLowerCase().includes(q);
+    });
 
   const openCount   = visibleIncidents.filter((i) => i.status === 'open').length;
   const closedCount = incidents.filter((i) => i.status === 'closed').length;
+
+  const priorityCounts = {
+    high:   eventFiltered.filter(i => i.status === 'open' && i.priority === 'high').length,
+    medium: eventFiltered.filter(i => i.status === 'open' && i.priority === 'medium').length,
+    low:    eventFiltered.filter(i => i.status === 'open' && i.priority === 'low').length,
+  };
 
   // Team open-incident counts (based on event filter, ignoring priority/team filter)
   const teamCounts = teams.reduce((acc, t) => {
@@ -333,15 +433,18 @@ export default function DashboardView() {
 
   const exportXLSX = useCallback(() => {
     const rows = incidents.map(i => ({
-      Tijd:        new Date(i.created_at).toLocaleString('nl-NL'),
-      Melder:      i.reporter,
-      Prioriteit:  i.priority,
-      Status:      i.status,
-      Team:        i.assigned_team || '',
-      Melding:     i.complaint    || '',
-      Evenement:   i.event_name   || '',
-      Lat:         i.lat ?? '',
-      Lng:         i.lng ?? '',
+      Tijd:           new Date(i.created_at).toLocaleString('nl-NL'),
+      Melder:         i.reporter,
+      Bron:           i.source === 'public' ? 'Omstander' : 'Team',
+      Prioriteit:     i.priority,
+      Status:         i.status,
+      Team:           i.assigned_team || '',
+      Aangenomen_om:  i.accepted_at ? new Date(i.accepted_at).toLocaleString('nl-NL') : '',
+      Afgesloten_om:  i.closed_at   ? new Date(i.closed_at).toLocaleString('nl-NL')   : '',
+      Melding:        i.complaint    || '',
+      Evenement:      i.event_name   || '',
+      Lat:            i.lat ?? '',
+      Lng:            i.lng ?? '',
     }));
     const ws = XLSX.utils.json_to_sheet(rows);
     const wb = XLSX.utils.book_new();
@@ -361,48 +464,58 @@ export default function DashboardView() {
       )}
 
       {/* ── Right: Incident Feed (40%) ── */}
-      <div className="w-2/5 flex flex-col border-l border-slate-700 overflow-hidden order-last">
+      <div className="w-1/2 lg:w-2/5 flex flex-col border-l border-slate-700 overflow-hidden order-last">
 
         {/* Header */}
         <div className="bg-slate-900 border-b border-slate-700 shrink-0">
           <div className="px-4 py-3 flex items-center justify-between gap-3">
             <div className="min-w-0">
               <h1 className="text-white font-bold text-lg tracking-wide leading-none">SMET</h1>
-              <p className="text-slate-400 text-xs mt-1">
-                {openCount} open &bull; {visibleIncidents.length} zichtbaar
-                {unassignedOpenCount > 0 && (
-                  <span className="ml-2 text-amber-400 font-semibold">{unassignedOpenCount} ontoeg.</span>
-                )}
-              </p>
-              {/* Team counts — only teams with open incidents */}
-              {teams.some(t => teamCounts[t.label] > 0) && (
+              <div className="flex items-center gap-2 mt-1 flex-wrap">
+                <p className="text-slate-400 text-xs">
+                  {openCount} open &bull; {visibleIncidents.length} zichtbaar
+                  {unassignedOpenCount > 0 && (
+                    <span className="ml-2 text-amber-400 font-semibold">{unassignedOpenCount} ontoeg.</span>
+                  )}
+                </p>
+                {/* Priority counts */}
+                {priorityCounts.high   > 0 && <span className="text-xs font-bold px-1.5 py-0.5 rounded bg-red-500/20 text-red-400">🔴 {priorityCounts.high}</span>}
+                {priorityCounts.medium > 0 && <span className="text-xs font-bold px-1.5 py-0.5 rounded bg-yellow-500/20 text-yellow-400">🟡 {priorityCounts.medium}</span>}
+                {priorityCounts.low    > 0 && <span className="text-xs font-bold px-1.5 py-0.5 rounded bg-green-500/20 text-green-400">🟢 {priorityCounts.low}</span>}
+              </div>
+              {/* Team counts with status dots */}
+              {teams.some(t => teamCounts[t.label] > 0 || teamStatuses[t.label]) && (
                 <div className="flex gap-1.5 mt-1.5 flex-wrap">
-                  {teams.filter(t => teamCounts[t.label] > 0).map(t => (
-                    <span key={t.role} className="text-xs bg-blue-900/50 text-blue-300 px-1.5 py-0.5 rounded font-semibold">
-                      {t.label} {teamCounts[t.label]}
-                    </span>
-                  ))}
+                  {teams.filter(t => teamCounts[t.label] > 0 || teamStatuses[t.label]).map(t => {
+                    const st = teamStatuses[t.label];
+                    return (
+                      <span key={t.role} className="flex items-center gap-1 text-xs bg-blue-900/50 text-blue-300 px-1.5 py-0.5 rounded font-semibold">
+                        {st && <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: STATUS_COLOR[st] ?? '#94a3b8' }} />}
+                        {t.label}{teamCounts[t.label] > 0 ? ` ${teamCounts[t.label]}` : ''}
+                      </span>
+                    );
+                  })}
                 </div>
               )}
             </div>
             <div className="flex gap-1.5 shrink-0 items-center">
               <button
                 onClick={() => { setShowLinks(v => !v); setShowBeheer(false); setConfirm(null); }}
-                className={`text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors
+                className={`text-xs font-semibold px-3 py-2 rounded-lg transition-colors
                   ${showLinks ? 'bg-blue-600 text-white' : 'bg-slate-800 hover:bg-slate-700 text-slate-300'}`}
               >
                 Links
               </button>
               <button
                 onClick={() => { setShowBeheer(v => !v); setShowLinks(false); setConfirm(null); }}
-                className={`text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors
+                className={`text-xs font-semibold px-3 py-2 rounded-lg transition-colors
                   ${showBeheer ? 'bg-red-700 text-white' : 'bg-slate-800 hover:bg-slate-700 text-slate-300'}`}
               >
                 Beheer
               </button>
               <button
                 onClick={() => setShowFilter(v => !v)}
-                className={`text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors
+                className={`text-xs font-semibold px-3 py-2 rounded-lg transition-colors
                   ${(filterPriority || filterTeam) ? 'bg-amber-600 text-white' : showFilter ? 'bg-slate-700 text-white' : 'bg-slate-800 hover:bg-slate-700 text-slate-300'}`}
                 title="Filter meldingen"
               >
@@ -420,7 +533,7 @@ export default function DashboardView() {
 
           {/* Active event bar */}
           <div
-            className="px-4 py-2 border-t border-slate-800 flex items-center gap-2 cursor-pointer select-none"
+            className="px-4 py-3 border-t border-slate-800 flex items-center gap-2 cursor-pointer select-none"
             onClick={() => { setShowEventPicker(v => !v); setShowLinks(false); setShowBeheer(false); }}
           >
             <span className="text-slate-500 text-xs font-semibold uppercase tracking-widest shrink-0">Actief evenement</span>
@@ -496,7 +609,7 @@ export default function DashboardView() {
                           href={url}
                           target="_blank"
                           rel="noreferrer"
-                          className="flex-1 text-white text-xs font-semibold hover:text-blue-400 transition-colors truncate"
+                          className="flex-1 text-white text-sm font-semibold hover:text-blue-400 transition-colors truncate"
                         >
                           {label}
                         </a>
@@ -551,14 +664,14 @@ export default function DashboardView() {
                 <div className="flex gap-2">
                   <button
                     onClick={() => navigate('/rapportage')}
-                    className="flex-1 text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl py-2 transition-colors"
+                    className="flex-1 text-sm font-semibold bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl py-2.5 transition-colors"
                   >
                     📋 Rapportage
                   </button>
                   <button
                     onClick={exportXLSX}
                     title={incidents.length === 0 ? 'Geen meldingen om te exporteren' : `${incidents.length} melding(en) exporteren als Excel`}
-                    className="flex-1 text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl py-2 transition-colors"
+                    className="flex-1 text-sm font-semibold bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl py-2.5 transition-colors"
                   >
                     ↓ Excel exporteren
                   </button>
@@ -642,7 +755,7 @@ export default function DashboardView() {
               {/* Geen */}
               <button
                 onClick={() => setActiveEventId('none')}
-                className={`shrink-0 text-xs font-semibold px-3 py-1.5 rounded-full border transition-all
+                className={`shrink-0 text-xs font-semibold px-3 py-2 rounded-full border transition-all
                   ${activeEventId === 'none'
                     ? 'bg-slate-600 border-slate-500 text-white shadow'
                     : 'bg-transparent border-slate-700 text-slate-500 hover:border-slate-500 hover:text-slate-300'}`}
@@ -653,7 +766,7 @@ export default function DashboardView() {
               {/* Alle */}
               <button
                 onClick={() => setActiveEventId(null)}
-                className={`shrink-0 text-xs font-semibold px-3 py-1.5 rounded-full border transition-all
+                className={`shrink-0 text-xs font-semibold px-3 py-2 rounded-full border transition-all
                   ${activeEventId === null
                     ? 'bg-blue-600 border-blue-500 text-white shadow'
                     : 'bg-transparent border-slate-700 text-slate-500 hover:border-slate-500 hover:text-slate-300'}`}
@@ -672,7 +785,7 @@ export default function DashboardView() {
                   <button
                     key={e.id}
                     onClick={() => setActiveEventId(e.id)}
-                    className={`shrink-0 flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full border transition-all
+                    className={`shrink-0 flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-full border transition-all
                       ${isActive
                         ? 'bg-blue-600 border-blue-500 text-white shadow'
                         : 'bg-transparent border-slate-700 text-slate-500 hover:border-slate-500 hover:text-slate-300'}`}
@@ -693,6 +806,24 @@ export default function DashboardView() {
           </div>
         )}
 
+        {/* Search + hide-closed bar */}
+        <div className="shrink-0 border-b border-slate-800 px-3 py-2 flex gap-2 items-center bg-slate-950">
+          <input
+            value={searchText}
+            onChange={e => setSearchText(e.target.value)}
+            placeholder="Zoek op naam, melding…"
+            className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+          />
+          <button
+            onClick={() => setHideClosed(v => !v)}
+            className={`shrink-0 text-sm font-semibold px-3 py-2.5 rounded-lg transition-colors
+              ${hideClosed ? 'bg-slate-600 text-white' : 'bg-slate-800 hover:bg-slate-700 text-slate-400'}`}
+            title="Gesloten meldingen verbergen"
+          >
+            {hideClosed ? 'Toon gesloten' : 'Verberg gesloten'}
+          </button>
+        </div>
+
         {/* Filter bar */}
         {showFilter && (
           <div className="shrink-0 border-b border-slate-800 bg-slate-900 px-4 py-2.5 flex flex-col gap-2">
@@ -702,7 +833,7 @@ export default function DashboardView() {
                 <button
                   key={p ?? 'all'}
                   onClick={() => setFilterPriority(p)}
-                  className={`text-xs font-bold px-2.5 py-1 rounded-lg transition-colors
+                  className={`text-sm font-bold px-3 py-2 rounded-lg transition-colors
                     ${filterPriority === p
                       ? p === 'high' ? 'bg-red-600 text-white' : p === 'medium' ? 'bg-yellow-600 text-white' : p === 'low' ? 'bg-green-700 text-white' : 'bg-slate-600 text-white'
                       : 'bg-slate-800 hover:bg-slate-700 text-slate-400'}`}
@@ -715,7 +846,7 @@ export default function DashboardView() {
               <span className="text-slate-500 text-xs font-semibold uppercase tracking-wider shrink-0">Team</span>
               <button
                 onClick={() => setFilterTeam(null)}
-                className={`text-xs font-bold px-2.5 py-1 rounded-lg transition-colors ${!filterTeam ? 'bg-slate-600 text-white' : 'bg-slate-800 hover:bg-slate-700 text-slate-400'}`}
+                className={`text-sm font-bold px-3 py-2 rounded-lg transition-colors ${!filterTeam ? 'bg-slate-600 text-white' : 'bg-slate-800 hover:bg-slate-700 text-slate-400'}`}
               >
                 Alle
               </button>
@@ -723,7 +854,7 @@ export default function DashboardView() {
                 <button
                   key={t.role}
                   onClick={() => setFilterTeam(filterTeam === t.label ? null : t.label)}
-                  className={`text-xs font-bold px-2.5 py-1 rounded-lg transition-colors ${filterTeam === t.label ? 'bg-blue-600 text-white' : 'bg-slate-800 hover:bg-slate-700 text-slate-400'}`}
+                  className={`text-sm font-bold px-3 py-2 rounded-lg transition-colors ${filterTeam === t.label ? 'bg-blue-600 text-white' : 'bg-slate-800 hover:bg-slate-700 text-slate-400'}`}
                 >
                   {t.label}
                 </button>
@@ -733,7 +864,7 @@ export default function DashboardView() {
         )}
 
         {/* Feed list */}
-        <div className="flex-1 overflow-y-auto">
+        <div ref={feedRef} className="flex-1 overflow-y-auto scroll-touch">
           {visibleIncidents.length === 0 && (
             <p className="text-slate-500 text-center mt-16 text-sm">Nog geen incidenten.</p>
           )}
@@ -747,38 +878,56 @@ export default function DashboardView() {
                 key={inc.id}
                 ref={(el) => { listRefs.current[inc.id] = el; }}
                 onClick={() => selectIncident(inc.id)}
+                style={{ borderLeft: `4px solid ${inc.status === 'closed' ? '#334155' : inc.source === 'public' ? '#f59e0b' : color}` }}
                 className={`
-                  cursor-pointer px-4 py-3 border-b border-slate-800 transition-colors
+                  cursor-pointer pl-3 pr-4 py-4 border-b border-slate-800 transition-colors
                   ${isSelected ? 'bg-slate-700' : 'hover:bg-slate-800'}
                   ${isFlash    ? 'animate-pulse bg-red-900/40' : ''}
                   ${inc.status === 'closed' ? 'opacity-40' : ''}
                 `}
               >
-                <div className="flex items-start gap-3">
-                  {/* Priority dot */}
-                  <div
-                    className="mt-1 shrink-0 w-3 h-3 rounded-full ring-2 ring-white/20"
-                    style={{ background: color }}
-                  />
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-white text-sm font-semibold truncate">
+                <div className="flex-1 min-w-0">
+                  {/* Top row: reporter + priority label + time + info */}
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="text-white text-base font-semibold truncate">
                         {inc.reporter}
                       </span>
-                      <span className="text-slate-500 text-xs shrink-0">
-                        {fmtTime(inc.created_at)}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-2 mt-0.5 flex-wrap">
                       <span
-                        className="text-xs font-bold px-1.5 py-0.5 rounded"
+                        className="text-xs font-bold px-1.5 py-0.5 rounded shrink-0"
                         style={{ background: color + '33', color }}
                       >
                         {PRIORITY_LABEL[inc.priority]}
                       </span>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <span className="text-slate-500 text-xs" title={fmtTime(inc.created_at)}>
+                        {fmtRelative(inc.created_at)}
+                      </span>
+                      <button
+                        onClick={e => { e.stopPropagation(); setDetailInc(inc); }}
+                        className="text-slate-300 hover:text-white bg-slate-600 hover:bg-slate-500 text-xs font-bold w-6 h-6 rounded-full flex items-center justify-center transition-colors shrink-0"
+                        title="Details"
+                      >
+                        i
+                      </button>
+                    </div>
+                  </div>
+                  {/* Badges row */}
+                  <div className="flex items-center gap-2 mt-1 flex-wrap">
+                      {inc.source === 'public' && (
+                        <span className="text-xs font-semibold px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400" title="Melding van omstander — verifieer vóór inzet">
+                          👥 Omstander
+                        </span>
+                      )}
                       {inc.assigned_team && (
                         <span className="text-xs font-semibold px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400">
                           👥 {inc.assigned_team}
+                        </span>
+                      )}
+                      {inc.accepted_at && (
+                        <span className="text-xs font-semibold px-1.5 py-0.5 rounded bg-green-500/20 text-green-400">
+                          ✓ Aangenomen
                         </span>
                       )}
                       {inc.rejected_by && (
@@ -787,7 +936,7 @@ export default function DashboardView() {
                         </span>
                       )}
                       {inc.status === 'closed' && (
-                        <span className="text-xs text-slate-500">GESLOTEN</span>
+                        <span className="text-xs text-slate-500 font-semibold">✓ Gesloten</span>
                       )}
                     </div>
                     {inc.complaint && (
@@ -796,6 +945,11 @@ export default function DashboardView() {
                     {inc.rejected_by && inc.rejection_reason && (
                       <p className="text-orange-400/80 text-xs mt-0.5 italic">"{inc.rejection_reason}"</p>
                     )}
+                    {inc.eta_text && (
+                      <span className="inline-block text-xs font-semibold px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-300 mt-0.5">
+                        ⏱ ETA {inc.eta_text}
+                      </span>
+                    )}
                     {inc.event_name && (
                       <p className="text-slate-500 text-xs mt-0.5">📅 {inc.event_name}</p>
                     )}
@@ -803,13 +957,12 @@ export default function DashboardView() {
                       <p className="text-slate-600 text-xs mt-0.5 italic">Geen GPS</p>
                     )}
                   </div>
-                </div>
                 {/* Action buttons */}
                 <div className="mt-2 flex gap-2">
                   {inc.status === 'open' && (
                     <button
                       onClick={(e) => closeIncident(inc.id, e)}
-                      className="flex-1 text-xs text-slate-400 hover:text-white bg-slate-800 hover:bg-slate-600 rounded-lg py-1.5 transition-colors"
+                      className="flex-1 text-sm text-slate-400 hover:text-white bg-slate-800 hover:bg-slate-600 rounded-lg py-2.5 transition-colors"
                     >
                       Markeer als gesloten
                     </button>
@@ -817,7 +970,7 @@ export default function DashboardView() {
                   {inc.status === 'open' && (
                     <button
                       onClick={(e) => { e.stopPropagation(); setAssigningId(assigningId === inc.id ? null : inc.id); setConfirmDelete(null); }}
-                      className={`text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors
+                      className={`text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors
                         ${inc.assigned_team ? 'bg-blue-700/50 hover:bg-blue-700 text-blue-300' : 'bg-slate-800 hover:bg-slate-600 text-slate-400 hover:text-white'}`}
                     >
                       👥
@@ -825,7 +978,7 @@ export default function DashboardView() {
                   )}
                   <button
                     onClick={(e) => { e.stopPropagation(); setConfirmDelete(inc.id); setAssigningId(null); }}
-                    className="text-xs text-red-500 hover:text-white bg-slate-800 hover:bg-red-700 rounded-lg px-3 py-1.5 transition-colors"
+                    className="text-sm text-red-500 hover:text-white bg-slate-800 hover:bg-red-700 rounded-lg px-4 py-2.5 transition-colors"
                     title="Verwijder melding"
                   >
                     ✕
@@ -846,23 +999,29 @@ export default function DashboardView() {
                       {inc.assigned_team && (
                         <button
                           onClick={() => assignTeam(inc.id, null)}
-                          className="text-xs px-2.5 py-1 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-400 transition-colors"
+                          className="text-sm px-3 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-400 transition-colors"
                         >
                           Geen
                         </button>
                       )}
-                      {teams.map(t => (
-                        <button
-                          key={t.role}
-                          onClick={() => assignTeam(inc.id, t.label)}
-                          className={`text-xs font-semibold px-2.5 py-1 rounded-lg transition-colors
-                            ${inc.assigned_team === t.label
-                              ? 'bg-blue-600 text-white'
-                              : 'bg-slate-800 hover:bg-blue-700 text-slate-300 hover:text-white'}`}
-                        >
-                          {t.label}
-                        </button>
-                      ))}
+                      {teams.map(t => {
+                        const count = teamCounts[t.label] || 0;
+                        const st    = teamStatuses[t.label];
+                        return (
+                          <button
+                            key={t.role}
+                            onClick={() => assignTeam(inc.id, t.label)}
+                            className={`text-sm font-semibold px-3 py-2 rounded-lg transition-colors flex items-center gap-1.5
+                              ${inc.assigned_team === t.label
+                                ? 'bg-blue-600 text-white'
+                                : 'bg-slate-800 hover:bg-blue-700 text-slate-300 hover:text-white'}`}
+                          >
+                            {st && <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: STATUS_COLOR[st] ?? '#94a3b8' }} />}
+                            {t.label}
+                            {count > 0 && <span className="text-xs opacity-70">({count})</span>}
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
                 </div>
@@ -900,7 +1059,7 @@ export default function DashboardView() {
       </div>
 
       {/* ── Left: Map (60%) ── */}
-      <div className="w-3/5 relative">
+      <div className="w-1/2 lg:w-3/5 relative">
         <MapContainer
           center={MAP_CENTER}
           zoom={MAP_ZOOM}
@@ -913,6 +1072,9 @@ export default function DashboardView() {
             maxZoom={19}
           />
           <MapController selectedId={selectedId} incidents={incidents} />
+          {editLocationId && (
+            <MapLocationPicker position={editLocationPos} onChange={setEditLocationPos} />
+          )}
 
           {/* Walking routes from settings */}
           {routes.map((route) => {
@@ -995,6 +1157,150 @@ export default function DashboardView() {
           LIVE
         </div>
       </div>
+
+      {/* Incident detail modal */}
+      {detailInc && (() => {
+        const inc = incidents.find(i => i.id === detailInc.id) ?? detailInc;
+        const color = PRIORITY_COLOR[inc.priority] || '#94a3b8';
+        const isEditingLoc = editLocationId === inc.id;
+        const history = Array.isArray(inc.assignment_history) ? inc.assignment_history : [];
+        return (
+          <div className="fixed inset-0 z-[9997] bg-black/75 flex items-center justify-center p-4" onClick={() => { setDetailInc(null); setEditLocationId(null); setEditLocationPos(null); }}>
+            <div className="bg-slate-800 border border-slate-700 rounded-2xl w-full max-w-md shadow-2xl overflow-hidden max-h-[90vh] flex flex-col" onClick={e => e.stopPropagation()}>
+              {/* Color bar */}
+              <div style={{ height: 4, background: inc.source === 'public' ? '#f59e0b' : color }} />
+              <div className="p-5 flex flex-col gap-3 overflow-y-auto">
+                {/* Header */}
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-white font-bold text-base">{inc.reporter}</p>
+                    <p className="text-slate-400 text-xs mt-0.5">
+                      {new Date(inc.created_at).toLocaleString('nl-NL', { dateStyle: 'medium', timeStyle: 'short' })}
+                    </p>
+                    {inc.accepted_at && (
+                      <p className="text-green-400 text-xs mt-0.5">
+                        ✓ Aangenomen {new Date(inc.accepted_at).toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit' })}
+                      </p>
+                    )}
+                    {inc.closed_at && (
+                      <p className="text-slate-400 text-xs mt-0.5">
+                        Afgesloten {new Date(inc.closed_at).toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit' })}
+                      </p>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className="text-xs font-bold px-2 py-0.5 rounded" style={{ background: color + '33', color }}>
+                      {PRIORITY_LABEL[inc.priority]}
+                    </span>
+                    {inc.status === 'closed' && (
+                      <span className="text-xs font-bold px-2 py-0.5 rounded bg-green-900/40 text-green-400">✓ Gesloten</span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Badges */}
+                <div className="flex flex-wrap gap-2">
+                  {inc.source === 'public' && (
+                    <span className="text-xs font-semibold px-2 py-0.5 rounded bg-amber-500/20 text-amber-400">👥 Omstander</span>
+                  )}
+                  {inc.assigned_team && (
+                    <span className="text-xs font-semibold px-2 py-0.5 rounded bg-blue-500/20 text-blue-300">👥 {inc.assigned_team}</span>
+                  )}
+                  {inc.event_name && (
+                    <span className="text-xs font-semibold px-2 py-0.5 rounded bg-slate-700 text-slate-300">📅 {inc.event_name}</span>
+                  )}
+                  {inc.eta_text && (
+                    <span className="text-xs font-semibold px-2 py-0.5 rounded bg-purple-500/20 text-purple-300">⏱ ETA {inc.eta_text}</span>
+                  )}
+                  {inc.rejected_by && (
+                    <span className="text-xs font-semibold px-2 py-0.5 rounded bg-orange-500/20 text-orange-400">✗ Afgew. {inc.rejected_by}</span>
+                  )}
+                </div>
+
+                {/* Complaint */}
+                {inc.complaint && (
+                  <div className="bg-slate-700/50 rounded-xl px-3 py-2.5">
+                    <p className="text-slate-300 text-sm whitespace-pre-wrap">{inc.complaint}</p>
+                  </div>
+                )}
+                {inc.rejected_by && inc.rejection_reason && (
+                  <p className="text-orange-400/80 text-sm italic">Reden afwijzing: "{inc.rejection_reason}"</p>
+                )}
+
+                {/* GPS + location edit */}
+                <div className="flex flex-col gap-2">
+                  {inc.lat && inc.lng ? (
+                    <a
+                      href={`https://maps.google.com/?q=${inc.lat},${inc.lng}`}
+                      target="_blank" rel="noreferrer"
+                      className="text-blue-400 hover:text-blue-300 text-sm underline"
+                    >
+                      📍 Open locatie in Maps
+                    </a>
+                  ) : (
+                    <p className="text-slate-600 text-sm italic">Geen GPS-locatie</p>
+                  )}
+                  {!isEditingLoc ? (
+                    <button
+                      onClick={() => {
+                        setEditLocationId(inc.id);
+                        setEditLocationPos(inc.lat && inc.lng ? [inc.lat, inc.lng] : null);
+                      }}
+                      className="text-xs text-slate-400 hover:text-amber-400 transition-colors self-start"
+                    >
+                      ✎ Locatie verplaatsen
+                    </button>
+                  ) : (
+                    <div className="flex flex-col gap-2">
+                      <p className="text-amber-400 text-xs font-semibold">Klik op de kaart om de locatie te verplaatsen</p>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => {
+                            if (editLocationPos) saveLocation(inc.id, editLocationPos[0], editLocationPos[1]);
+                          }}
+                          disabled={!editLocationPos}
+                          className="flex-1 py-2 rounded-xl text-xs font-bold bg-amber-600 hover:bg-amber-500 disabled:opacity-40 text-white transition-colors"
+                        >
+                          Locatie opslaan
+                        </button>
+                        <button
+                          onClick={() => { setEditLocationId(null); setEditLocationPos(null); }}
+                          className="px-3 py-2 rounded-xl text-xs bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors"
+                        >
+                          Annuleer
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Audit log / assignment history */}
+                {history.length > 0 && (
+                  <div>
+                    <p className="text-slate-500 text-xs font-semibold uppercase tracking-wider mb-2">Activiteitenlog</p>
+                    <div className="flex flex-col gap-1">
+                      {history.map((entry, i) => {
+                        const labelFn = AUDIT_LABEL[entry.type];
+                        const label = labelFn ? labelFn(entry) : entry.type;
+                        return (
+                          <div key={i} className="flex items-start gap-2 text-xs">
+                            <span className="text-slate-600 shrink-0 font-mono">{fmtAuditTime(entry.timestamp)}</span>
+                            <span className="text-slate-300">{label}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                <button onClick={() => { setDetailInc(null); setEditLocationId(null); setEditLocationPos(null); }} className="mt-1 w-full py-2 rounded-xl bg-slate-700 hover:bg-slate-600 text-slate-300 text-sm transition-colors">
+                  Sluiten
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* QR-code modal */}
       {qrModal && (

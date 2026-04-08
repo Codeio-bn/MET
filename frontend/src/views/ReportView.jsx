@@ -93,10 +93,16 @@ function IncidentCard({ inc, materials, onClose, onReject }) {
     setClosing(true);
     const supplyText  = suppliesToText(supplies, materials);
     const fullNotes   = [supplyText, notes.trim()].filter(Boolean).join('\n');
+    const structuredMaterials = materials
+      .filter(({ key }) => supplies[key] > 0)
+      .map(({ key, label, icon }) => ({ key, label, icon, count: supplies[key] }));
     await fetch(`/api/incidents/${inc.id}/close`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ notes: fullNotes || undefined }),
+      body: JSON.stringify({
+        notes: fullNotes || undefined,
+        materials_used: structuredMaterials.length ? structuredMaterials : undefined,
+      }),
     });
     onClose(inc.id);
     setClosing(false);
@@ -176,7 +182,7 @@ function IncidentCard({ inc, materials, onClose, onReject }) {
         <button
           onClick={handleClose}
           disabled={closing}
-          className="w-full py-3 rounded-xl bg-green-700 hover:bg-green-600 disabled:opacity-50 text-white font-bold text-sm transition-colors"
+          className="w-full py-4 rounded-xl bg-green-700 hover:bg-green-600 disabled:opacity-50 text-white font-bold text-base transition-colors"
         >
           {closing ? 'Afmelden…' : '✓ Melding afmelden'}
         </button>
@@ -184,7 +190,7 @@ function IncidentCard({ inc, materials, onClose, onReject }) {
         {!showReject ? (
           <button
             onClick={() => setShowReject(true)}
-            className="w-full py-2 rounded-xl bg-slate-700 hover:bg-orange-800 text-slate-400 hover:text-white text-sm font-semibold transition-colors"
+            className="w-full py-3 rounded-xl bg-slate-700 hover:bg-orange-800 text-slate-400 hover:text-white text-sm font-semibold transition-colors"
           >
             Afwijzen
           </button>
@@ -247,15 +253,20 @@ function NewIncidentForm({ myTeamLabel, activeEvent, materials, onCreated, onCan
     setSending(true);
     const supplyText = suppliesToText(supplies, materials);
     const fullComplaint = [supplyText, complaint.trim()].filter(Boolean).join('\n');
+    const structuredMaterials = materials
+      .filter(({ key }) => supplies[key] > 0)
+      .map(({ key, label, icon }) => ({ key, label, icon, count: supplies[key] }));
     const payload = {
-      reporter:      myTeamLabel || 'Team',
+      reporter:       myTeamLabel || 'Team',
       priority,
-      complaint:     fullComplaint || null,
-      lat:           coords?.[0] ?? null,
-      lng:           coords?.[1] ?? null,
-      assigned_team: myTeamLabel || undefined,
-      event_id:      activeEvent?.id   ?? null,
-      event_name:    activeEvent?.name ?? null,
+      complaint:      fullComplaint || null,
+      lat:            coords?.[0] ?? null,
+      lng:            coords?.[1] ?? null,
+      assigned_team:  myTeamLabel || undefined,
+      event_id:       activeEvent?.id   ?? null,
+      event_name:     activeEvent?.name ?? null,
+      source:         'team',
+      materials_used: structuredMaterials.length ? structuredMaterials : [],
     };
     try {
       const res = await fetch('/api/incidents', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
@@ -392,9 +403,12 @@ export default function ReportView() {
   const [alertIncident, setAlertIncident] = useState(null); // incoming assignment overlay
   const [alertRejectReason, setAlertRejectReason] = useState('');
   const [alertShowReject, setAlertShowReject]     = useState(false);
+  const [alertEta, setAlertEta]                   = useState('');
   const [showNew, setShowNew]         = useState(false);
   const [queueCount, setQueueCount]   = useState(0);
+  const [myStatus, setMyStatus]       = useState('beschikbaar');
   const soundUrlRef = useRef(null);
+  const socketRef   = useRef(null);
 
   // ── Role init ──
   useEffect(() => {
@@ -434,6 +448,10 @@ export default function ReportView() {
       .catch(() => {});
 
     const socket = io({ transports: ['websocket', 'polling'] });
+    socketRef.current = socket;
+
+    // Broadcast initial status
+    socket.emit('team_status', { label: myTeamLabel, status: myStatus });
 
     const handleUpdated = (inc) => {
       if (inc.assigned_team === myTeamLabel && inc.status === 'open') {
@@ -443,6 +461,7 @@ export default function ReportView() {
           // Newly assigned — skip alert if we reported it ourselves
           if (inc.reporter === myTeamLabel) return [inc, ...prev];
           playAlert(soundUrlRef.current);
+          navigator.vibrate?.([300, 100, 300, 100, 300]);
           setAlertIncident(inc);
           return prev;
         });
@@ -458,6 +477,7 @@ export default function ReportView() {
           setIncidents(prev => [inc, ...prev]);
         } else {
           playAlert(soundUrlRef.current);
+          navigator.vibrate?.([300, 100, 300, 100, 300]);
           setAlertIncident(inc);
         }
       }
@@ -476,7 +496,12 @@ export default function ReportView() {
     window.addEventListener('online', drainQueue);
     drainQueue();
 
-    return () => { socket.disconnect(); window.removeEventListener('online', drainQueue); };
+    return () => { socket.disconnect(); socketRef.current = null; window.removeEventListener('online', drainQueue); };
+  }, [myTeamLabel]);
+
+  const changeStatus = useCallback((status) => {
+    setMyStatus(status);
+    socketRef.current?.emit('team_status', { label: myTeamLabel, status });
   }, [myTeamLabel]);
 
   const handleClosed   = useCallback((id) => setIncidents(prev => prev.filter(i => i.id !== id)), []);
@@ -514,14 +539,44 @@ export default function ReportView() {
               ) : (
                 <p className="text-slate-600 text-xs mt-2 italic">Geen GPS locatie</p>
               )}
+              {/* ETA presets + custom input */}
+              <div className="mt-4">
+                <p className="text-slate-500 text-xs font-semibold uppercase tracking-wider mb-2">ETA (optioneel)</p>
+                <div className="flex gap-1.5 flex-wrap mb-2">
+                  {['5 min', '10 min', '15 min', '20 min', '30 min'].map(preset => (
+                    <button
+                      key={preset}
+                      onClick={() => setAlertEta(alertEta === preset ? '' : preset)}
+                      className={`text-xs font-bold px-3 py-1.5 rounded-lg transition-colors
+                        ${alertEta === preset ? 'bg-blue-600 text-white' : 'bg-slate-700 hover:bg-slate-600 text-slate-300'}`}
+                    >
+                      {preset}
+                    </button>
+                  ))}
+                </div>
+                <input
+                  value={alertEta}
+                  onChange={e => setAlertEta(e.target.value)}
+                  placeholder="Andere ETA…"
+                  className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                />
+              </div>
+
               <button
-                onClick={() => {
+                onClick={async () => {
+                  await fetch(`/api/incidents/${alertIncident.id}/accept`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ team: myTeamLabel, eta: alertEta.trim() || undefined }),
+                  });
+                  changeStatus('onderweg');
                   setIncidents(prev => [alertIncident, ...prev]);
                   setAlertIncident(null);
                   setAlertShowReject(false);
                   setAlertRejectReason('');
+                  setAlertEta('');
                 }}
-                className="mt-4 w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-sm transition-colors"
+                className="mt-2 w-full py-4 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-base transition-colors"
               >
                 Begrepen — melding oppakken
               </button>
@@ -529,7 +584,7 @@ export default function ReportView() {
               {!alertShowReject ? (
                 <button
                   onClick={() => setAlertShowReject(true)}
-                  className="mt-1 w-full py-2.5 rounded-xl bg-slate-800 hover:bg-orange-900 text-slate-400 hover:text-white text-sm font-semibold transition-colors"
+                  className="mt-1 w-full py-3.5 rounded-xl bg-slate-800 hover:bg-orange-900 text-slate-400 hover:text-white text-sm font-semibold transition-colors"
                 >
                   Afwijzen
                 </button>
@@ -605,6 +660,25 @@ export default function ReportView() {
         )}
         {queueCount > 0 && (
           <p className="text-yellow-400 text-xs mt-1">{queueCount} melding(en) in wachtrij (offline)</p>
+        )}
+
+        {/* Team status selector */}
+        {myTeamLabel && (
+          <div className="flex gap-2 mt-2">
+            {[
+              { key: 'beschikbaar', label: 'Beschikbaar', color: 'bg-green-700 text-white',   inactive: 'bg-slate-800 text-slate-500 hover:bg-slate-700' },
+              { key: 'onderweg',    label: 'Onderweg',    color: 'bg-yellow-600 text-white',  inactive: 'bg-slate-800 text-slate-500 hover:bg-slate-700' },
+              { key: 'bezet',       label: 'Bezet',       color: 'bg-red-700 text-white',     inactive: 'bg-slate-800 text-slate-500 hover:bg-slate-700' },
+            ].map(({ key, label, color, inactive }) => (
+              <button
+                key={key}
+                onClick={() => changeStatus(key)}
+                className={`flex-1 py-3 rounded-xl text-sm font-bold transition-colors ${myStatus === key ? color : inactive}`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         )}
       </div>
 

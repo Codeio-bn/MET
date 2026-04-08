@@ -14,6 +14,25 @@ const BEEP_OFF  = 0.10;
 const VOLUME    = 0.55;
 const WAVE      = 'square'; // 'sine' | 'square' | 'sawtooth' | 'triangle'
 
+export function playAlertSoft() {
+  try {
+    const ctx  = new (window.AudioContext || window.webkitAudioContext)();
+    const osc  = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.type = 'sine';
+    osc.frequency.value = 880;
+    const t = ctx.currentTime;
+    gain.gain.setValueAtTime(0, t);
+    gain.gain.linearRampToValueAtTime(0.25, t + 0.02);
+    gain.gain.setValueAtTime(0.25, t + 0.15);
+    gain.gain.linearRampToValueAtTime(0, t + 0.22);
+    osc.start(t);
+    osc.stop(t + 0.25);
+  } catch { /* AudioContext not available */ }
+}
+
 export function playAlert(customUrl = null) {
   // ── Custom uploaded sound ──
   if (customUrl) {
