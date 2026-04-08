@@ -46,6 +46,49 @@ button {
   animation: livePing 1.6s ease-out infinite 0.55s;
 }
 
+/* ── Print styles (Rapportage PDF) ──────────────── */
+@media print {
+  .rapportage-page {
+    background: white !important;
+    color: #1e293b !important;
+    min-height: unset !important;
+  }
+
+  /* Reset all slate/dark backgrounds to white */
+  .rapportage-page [class*="bg-slate"],
+  .rapportage-page [class*="bg-gray"] {
+    background-color: white !important;
+  }
+
+  /* Reset text colours so dark-theme text reads on white */
+  .rapportage-page [class*="text-slate"],
+  .rapportage-page [class*="text-white"],
+  .rapportage-page [class*="text-gray"] {
+    color: #334155 !important;
+  }
+
+  /* Borders */
+  .rapportage-page [class*="border-slate"],
+  .rapportage-page [class*="divide-slate"] {
+    border-color: #e2e8f0 !important;
+  }
+
+  /* Keep each incident together on one page if possible */
+  .rapportage-incident {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  /* Print title shown only on paper */
+  .rapportage-print-title {
+    display: block !important;
+    font-size: 18pt;
+    font-weight: 700;
+    color: #0f172a;
+    margin-bottom: 8pt;
+  }
+}
+
 /* ── Tablet optimizations ────────────────────────── */
 /* Ensure minimum touch target height */
 .touch-target {

@@ -90,7 +90,12 @@ export default function RapportageView() {
   };
 
   return (
-    <div className="page-enter min-h-screen bg-slate-950 flex flex-col">
+    <div className="rapportage-page page-enter min-h-screen bg-slate-950 flex flex-col">
+
+      {/* Print-only title */}
+      <div className="rapportage-print-title hidden">
+        SMET — Rapportage &nbsp;·&nbsp; {total} meldingen · {open} open · {closed} afgemeld
+      </div>
 
       {/* Header */}
       <div className="bg-slate-900 border-b border-slate-700 px-5 py-4 flex items-center justify-between">
@@ -105,14 +110,14 @@ export default function RapportageView() {
         </div>
         <button
           onClick={() => navigate('/dashboard')}
-          className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors"
+          className="print:hidden text-xs font-semibold px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors"
         >
           ← Dashboard
         </button>
       </div>
 
       {/* Filters */}
-      <div className="bg-slate-900 border-b border-slate-800 px-4 py-3 flex flex-col gap-2">
+      <div className="print:hidden bg-slate-900 border-b border-slate-800 px-4 py-3 flex flex-col gap-2">
 
         {/* Search */}
         <input
@@ -259,6 +264,19 @@ export default function RapportageView() {
         );
       })()}
 
+      {/* Beheer */}
+      <div className="print:hidden bg-slate-900 border-b border-slate-800 px-4 py-3">
+        <p className="text-slate-500 text-xs font-semibold uppercase tracking-widest mb-2">Beheer</p>
+        <div className="flex gap-2">
+          <button
+            onClick={() => window.print()}
+            className="flex-1 text-sm font-semibold bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl py-2.5 transition-colors"
+          >
+            PDF exporteren
+          </button>
+        </div>
+      </div>
+
       {/* List */}
       <div className="flex-1 overflow-y-auto divide-y divide-slate-800">
         {filtered.length === 0 && (
@@ -267,7 +285,7 @@ export default function RapportageView() {
         {filtered.map(inc => {
           const color = PRIORITY_COLOR[inc.priority] || '#94a3b8';
           return (
-            <div key={inc.id} className="px-5 py-4" style={{ borderLeft: `3px solid ${inc.status === 'closed' ? '#334155' : color}` }}>
+            <div key={inc.id} className="rapportage-incident px-5 py-4" style={{ borderLeft: `3px solid ${inc.status === 'closed' ? '#334155' : color}` }}>
               <div className="flex items-start justify-between gap-3">
                 <div className="flex-1 min-w-0">
                   {/* Top row */}
