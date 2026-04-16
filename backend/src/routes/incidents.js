@@ -144,6 +144,31 @@ router.patch('/:id/assign', async (req, res) => {
   }
 });
 
+// PATCH /:id/note — append a coordinator note to an open incident
+router.patch('/:id/note', async (req, res) => {
+  const { note } = req.body;
+  if (!note?.trim()) return res.status(400).json({ error: 'note is required' });
+  const entry = { type: 'note', note: note.trim(), timestamp: new Date().toISOString() };
+  try {
+    const result = await pool.query(
+      `UPDATE incidents
+       SET complaint = CASE WHEN complaint IS NULL OR complaint = ''
+             THEN $2 ELSE complaint || E'\\n\\n' || $2 END,
+           assignment_history = COALESCE(assignment_history, '[]'::jsonb) || $3::jsonb
+       WHERE id = $1 AND status = 'open' RETURNING *`,
+      [req.params.id, note.trim(), JSON.stringify([entry])]
+    );
+    if (result.rows.length === 0)
+      return res.status(404).json({ error: 'Incident niet gevonden of al afgesloten' });
+    const incident = result.rows[0];
+    req.io.emit('incident_updated', incident);
+    res.json(incident);
+  } catch (err) {
+    console.error('PATCH /incidents/:id/note error:', err.message);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
 // PATCH /:id/close — mark incident as closed, optionally append notes to complaint
 router.patch('/:id/close', async (req, res) => {
   const { notes, materials_used } = req.body || {};

@@ -135,6 +135,7 @@ const AUDIT_LABEL = {
   rejected:         (e) => `Afgewezen door ${e.team}${e.reason ? `: ${e.reason}` : ''}`,
   closed:           ()  => 'Melding afgesloten',
   location_updated: ()  => 'Locatie gecorrigeerd',
+  note:             (e) => `📝 ${e.note}`,
 };
 
 function fmtAuditTime(iso) {
@@ -192,6 +193,8 @@ export default function DashboardView() {
   const [tick, setTick]                       = useState(0);
   const [editLocationId, setEditLocationId]   = useState(null); // incId being pin-moved
   const [editLocationPos, setEditLocationPos] = useState(null); // [lat, lng]
+  const [noteText, setNoteText]               = useState('');
+  const [noteSaving, setNoteSaving]           = useState(false);
   const feedRef                               = useRef(null);
   const listRefs = useRef({});
 
@@ -367,6 +370,25 @@ export default function DashboardView() {
     } catch (err) { console.error(err); }
     setEditLocationId(null);
     setEditLocationPos(null);
+  }, []);
+
+  const saveNote = useCallback(async (incId, note) => {
+    if (!note.trim()) return;
+    setNoteSaving(true);
+    try {
+      const res = await fetch(`/api/incidents/${incId}/note`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ note }),
+      });
+      if (res.ok) {
+        const updated = await res.json();
+        setIncidents(prev => prev.map(i => i.id === updated.id ? updated : i));
+        setDetailInc(updated);
+        setNoteText('');
+      }
+    } catch (err) { console.error(err); }
+    setNoteSaving(false);
   }, []);
 
   // Generate QR codes when links panel opens
@@ -1225,6 +1247,27 @@ export default function DashboardView() {
                 )}
                 {inc.rejected_by && inc.rejection_reason && (
                   <p className="text-orange-400/80 text-sm italic">Reden afwijzing: "{inc.rejection_reason}"</p>
+                )}
+
+                {/* Coordinator note (only on open incidents) */}
+                {inc.status === 'open' && (
+                  <div className="flex flex-col gap-1.5">
+                    <p className="text-slate-500 text-xs font-semibold uppercase tracking-wider">Notitie toevoegen</p>
+                    <textarea
+                      value={noteText}
+                      onChange={e => setNoteText(e.target.value)}
+                      placeholder="Voeg een notitie toe aan deze melding…"
+                      rows={2}
+                      className="w-full bg-slate-700 border border-slate-600 rounded-xl px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 resize-none"
+                    />
+                    <button
+                      onClick={() => saveNote(inc.id, noteText)}
+                      disabled={!noteText.trim() || noteSaving}
+                      className="self-end text-xs font-semibold px-3 py-1.5 rounded-lg bg-blue-700 hover:bg-blue-600 disabled:opacity-40 disabled:cursor-not-allowed text-white transition-colors"
+                    >
+                      {noteSaving ? 'Opslaan…' : 'Opslaan'}
+                    </button>
+                  </div>
                 )}
 
                 {/* GPS + location edit */}
